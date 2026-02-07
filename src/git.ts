@@ -26,10 +26,16 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 
 /**
  * Initialize git repo if not already initialized.
+ * Checks that the repo root actually matches the project root —
+ * without this, git rev-parse finds a parent repo and we never init.
  */
 export async function ensureGitRepo(root: string): Promise<void> {
   try {
-    await git(root, "rev-parse", "--git-dir");
+    const toplevel = await git(root, "rev-parse", "--show-toplevel");
+    const { resolve } = await import("node:path");
+    if (resolve(toplevel) !== resolve(root)) {
+      throw new Error("parent repo, not ours");
+    }
   } catch {
     await git(root, "init");
     await git(root, "add", "-A");

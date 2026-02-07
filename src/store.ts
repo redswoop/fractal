@@ -14,21 +14,38 @@ import { join, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Projects root — resolved once at startup
+// Test projects (IDs starting with _) route to a separate directory.
 // ---------------------------------------------------------------------------
 
 const PROJECTS_ROOT = resolve(
   process.env["FRINGE_PROJECTS_ROOT"] ?? join(import.meta.dirname, "..", "projects")
 );
 
+const TEST_PROJECTS_ROOT = resolve(
+  process.env["FRINGE_TEST_PROJECTS_ROOT"] ?? join(import.meta.dirname, "..", "test-projects")
+);
+
+function isTestProject(projectId: string): boolean {
+  return projectId.startsWith("_");
+}
+
+function resolveProjectsRoot(projectId: string): string {
+  return isTestProject(projectId) ? TEST_PROJECTS_ROOT : PROJECTS_ROOT;
+}
+
 export function getProjectsRoot(): string {
   return PROJECTS_ROOT;
 }
 
+export function getTestProjectsRoot(): string {
+  return TEST_PROJECTS_ROOT;
+}
+
 export function projectRoot(projectId: string): string {
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(projectId)) {
-    throw new Error(`Invalid project ID: "${projectId}". Use lowercase alphanumeric and hyphens.`);
+  if (!/^_?[a-z0-9][a-z0-9-]*$/.test(projectId)) {
+    throw new Error(`Invalid project ID: "${projectId}". Use lowercase alphanumeric, hyphens, and optional _ prefix for test projects.`);
   }
-  const root = join(PROJECTS_ROOT, projectId);
+  const root = join(resolveProjectsRoot(projectId), projectId);
   if (!existsSync(root)) {
     throw new Error(`Project "${projectId}" not found at ${root}`);
   }
@@ -159,18 +176,20 @@ export interface ProjectData {
 }
 
 export async function listProjects(): Promise<{ id: string; title: string; status: string }[]> {
-  if (!existsSync(PROJECTS_ROOT)) return [];
-  const entries = await readdir(PROJECTS_ROOT, { withFileTypes: true });
   const projects: { id: string; title: string; status: string }[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-    const projectJsonPath = join(PROJECTS_ROOT, entry.name, "project.json");
-    if (!existsSync(projectJsonPath)) continue;
-    try {
-      const data = await readJson<ProjectData>(projectJsonPath);
-      projects.push({ id: entry.name, title: data.title, status: data.status });
-    } catch {
-      projects.push({ id: entry.name, title: "(unreadable)", status: "error" });
+  for (const root of [PROJECTS_ROOT, TEST_PROJECTS_ROOT]) {
+    if (!existsSync(root)) continue;
+    const entries = await readdir(root, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const projectJsonPath = join(root, entry.name, "project.json");
+      if (!existsSync(projectJsonPath)) continue;
+      try {
+        const data = await readJson<ProjectData>(projectJsonPath);
+        projects.push({ id: entry.name, title: data.title, status: data.status });
+      } catch {
+        projects.push({ id: entry.name, title: "(unreadable)", status: "error" });
+      }
     }
   }
   return projects;
@@ -180,10 +199,10 @@ export async function ensureProjectStructure(
   projectId: string,
   title: string
 ): Promise<string> {
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(projectId)) {
-    throw new Error(`Invalid project ID: "${projectId}". Use lowercase alphanumeric and hyphens.`);
+  if (!/^_?[a-z0-9][a-z0-9-]*$/.test(projectId)) {
+    throw new Error(`Invalid project ID: "${projectId}". Use lowercase alphanumeric, hyphens, and optional _ prefix for test projects.`);
   }
-  const root = join(PROJECTS_ROOT, projectId);
+  const root = join(resolveProjectsRoot(projectId), projectId);
 
   await mkdir(root, { recursive: true });
   await mkdir(join(root, "parts"), { recursive: true });
@@ -209,6 +228,87 @@ export async function ensureProjectStructure(
   }
 
   return root;
+}
+
+// ---------------------------------------------------------------------------
+// Part / chapter creation
+// ---------------------------------------------------------------------------
+
+export async function createPart(
+  projectId: string,
+  partId: string,
+  title: string,
+  summary: string = "",
+  arc: string = ""
+): Promise<WriteResult[]> {
+  const root = projectRoot(projectId);
+  const partDir = join(root, "parts", partId);
+  await mkdir(partDir, { recursive: true });
+
+  const partJsonPath = join(partDir, "part.json");
+  const partData: PartData = { title, summary, arc, status: "planning", chapters: [] };
+  await writeJson(partJsonPath, partData);
+
+  // Add to project.json parts list if not already there
+  const project = await readJson<ProjectData>(join(root, "project.json"));
+  if (!project.parts.includes(partId)) {
+    project.parts.push(partId);
+    await writeJson(join(root, "project.json"), project);
+  }
+
+  return [
+    { path: partJsonPath, description: `Created ${partId}/part.json` },
+    { path: join(root, "project.json"), description: `Added ${partId} to project.json parts list` },
+  ];
+}
+
+export async function createChapter(
+  projectId: string,
+  partId: string,
+  chapterId: string,
+  title: string,
+  summary: string = "",
+  pov: string = "",
+  location: string = "",
+  timelinePosition: string = ""
+): Promise<WriteResult[]> {
+  const root = projectRoot(projectId);
+  const partDir = join(root, "parts", partId);
+
+  // Ensure part directory exists
+  if (!existsSync(partDir)) {
+    throw new Error(`Part "${partId}" does not exist. Create it first with create_part.`);
+  }
+
+  // Create the chapter prose file with a title and closing marker
+  const mdPath = join(partDir, `${chapterId}.md`);
+  await writeMd(mdPath, `# ${title}\n\n<!-- /chapter -->\n`);
+
+  // Create the chapter meta file
+  const metaPath = join(partDir, `${chapterId}.meta.json`);
+  const meta: ChapterMeta = {
+    title,
+    summary,
+    pov,
+    location,
+    timeline_position: timelinePosition,
+    status: "planning",
+    beats: [],
+  };
+  await writeJson(metaPath, meta);
+
+  // Add to part.json chapters list if not already there
+  const part = await readJson<PartData>(join(partDir, "part.json"));
+  if (!part.chapters.includes(chapterId)) {
+    part.chapters.push(chapterId);
+    await writeJson(join(partDir, "part.json"), part);
+  }
+
+  return [
+    { path: mdPath, description: `Created ${partId}/${chapterId}.md` },
+    { path: metaPath, description: `Created ${partId}/${chapterId}.meta.json` },
+    { path: join(partDir, "part.json"), description: `Added ${chapterId} to ${partId} chapters list` },
+  ];
 }
 
 // ---------------------------------------------------------------------------

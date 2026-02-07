@@ -115,6 +115,49 @@ function createMcpServer(): McpServer {
     return jsonResult({ project, root, description: `Created project "${title}" at ${root}` });
   });
 
+  server.registerTool("create_part", {
+    title: "Create Part",
+    description: "Create a new part directory with part.json and add it to the project's parts list.",
+    inputSchema: {
+      project: projectParam,
+      part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
+      title: z.string().describe("Display title for the part"),
+      summary: z.string().optional().describe("Part summary"),
+      arc: z.string().optional().describe("Arc description for this part"),
+    },
+  }, async ({ project, part_id, title, summary, arc }) => {
+    const root = store.projectRoot(project);
+    const results = await withCommit(
+      root,
+      () => store.createPart(project, part_id, title, summary ?? "", arc ?? ""),
+      `Created part ${part_id}: ${title}`
+    );
+    return jsonResult(results);
+  });
+
+  server.registerTool("create_chapter", {
+    title: "Create Chapter",
+    description: "Create a new chapter (prose .md + .meta.json) inside a part and add it to the part's chapters list.",
+    inputSchema: {
+      project: projectParam,
+      part_id: z.string().describe("Part identifier"),
+      chapter_id: z.string().describe("Chapter identifier, e.g. 'chapter-01'"),
+      title: z.string().describe("Chapter title"),
+      summary: z.string().optional().describe("Chapter summary"),
+      pov: z.string().optional().describe("POV character id"),
+      location: z.string().optional().describe("Location id"),
+      timeline_position: z.string().optional().describe("Timeline position, e.g. '1996-09-14'"),
+    },
+  }, async ({ project, part_id, chapter_id, title, summary, pov, location, timeline_position }) => {
+    const root = store.projectRoot(project);
+    const results = await withCommit(
+      root,
+      () => store.createChapter(project, part_id, chapter_id, title, summary ?? "", pov ?? "", location ?? "", timeline_position ?? ""),
+      `Created chapter ${part_id}/${chapter_id}: ${title}`
+    );
+    return jsonResult(results);
+  });
+
   // =================================================================
   // READ OPERATIONS
   // =================================================================
@@ -547,7 +590,7 @@ app.addHook("onRequest", (request, reply, done) => {
 // --- Health check ---
 app.get("/health", async () => {
   const projects = await store.listProjects();
-  return { status: "ok", projects_root: store.getProjectsRoot(), projects };
+  return { status: "ok", projects_root: store.getProjectsRoot(), test_projects_root: store.getTestProjectsRoot(), projects };
 });
 
 // --- Help endpoint ---
@@ -562,6 +605,8 @@ app.get("/help", async () => {
         hello: "Proof-of-life greeting to verify the connector is working.",
         list_projects: "List all available projects (id, title, status).",
         create_project: "Bootstrap a new project with all directories and starter files.",
+        create_part: "Create a new part directory with part.json, add to project parts list.",
+        create_chapter: "Create a new chapter (.md + .meta.json) inside a part, add to part chapters list.",
       },
       read: {
         get_project: "Top-level project metadata: title, logline, status, themes, parts list.",
@@ -701,8 +746,11 @@ app.delete("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
 async function main() {
   try {
     const projectsRoot = store.getProjectsRoot();
-    if (!existsSync(projectsRoot)) {
-      await mkdir(projectsRoot, { recursive: true });
+    const testRoot = store.getTestProjectsRoot();
+    for (const dir of [projectsRoot, testRoot]) {
+      if (!existsSync(dir)) {
+        await mkdir(dir, { recursive: true });
+      }
     }
 
     // Ensure git repos for all existing projects
@@ -717,6 +765,7 @@ async function main() {
     console.log(`  Help:         http://localhost:${PORT}/help`);
     console.log(`  MCP endpoint: http://localhost:${PORT}/mcp`);
     console.log(`  Projects:     ${projectsRoot}`);
+    console.log(`  Test:         ${testRoot}`);
     console.log(`  Loaded:       ${projects.map((p) => p.id).join(", ") || "(none)"}\n`);
   } catch (err) {
     app.log.error(err);
