@@ -61,8 +61,33 @@ async function withCommit<T extends store.WriteResult | store.WriteResult[]>(
   const result = await fn();
   const results = Array.isArray(result) ? result : [result];
   const files = results.map((r) => r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path);
-  await autoCommit(root, files, commitMessage);
+  try {
+    await autoCommit(root, files, commitMessage);
+  } catch (err) {
+    console.error(`[git-warning] Auto-commit failed for "${commitMessage}":`,
+      err instanceof Error ? err.message : err);
+  }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Tool-level logging
+// ---------------------------------------------------------------------------
+
+function logToolCall(toolName: string, args: Record<string, unknown>) {
+  const argSummary = Object.entries(args)
+    .map(([k, v]) => {
+      const s = typeof v === "string" ? v : JSON.stringify(v);
+      const val = s && s.length > 80 ? s.slice(0, 80) + "…" : s;
+      return `${k}=${val}`;
+    })
+    .join(", ");
+  console.log(`[tool] ${toolName}(${argSummary})`);
+}
+
+function logToolError(toolName: string, err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[tool-error] ${toolName}: ${message}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -110,14 +135,20 @@ function createMcpServer(): McpServer {
       title: z.string().describe("Display title for the project"),
     },
   }, async ({ project, title }) => {
-    const root = await store.ensureProjectStructure(project, title);
-    await ensureGitRepo(root);
-    return jsonResult({ project, root, description: `Created project "${title}" at ${root}` });
+    logToolCall("create_project", { project, title });
+    try {
+      const root = await store.ensureProjectStructure(project, title);
+      await ensureGitRepo(root);
+      return jsonResult({ project, root, description: `Created project "${title}" at ${root}` });
+    } catch (err) {
+      logToolError("create_project", err);
+      throw err;
+    }
   });
 
   server.registerTool("create_part", {
     title: "Create Part",
-    description: "Create a new part directory with part.json and add it to the project's parts list.",
+    description: "Create a new part directory with part.json and add it to the project's parts list. Must be called BEFORE create_chapter for this part. Workflow: create_part → create_chapter → add_beat → write_beat_prose.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
@@ -126,18 +157,24 @@ function createMcpServer(): McpServer {
       arc: z.string().optional().describe("Arc description for this part"),
     },
   }, async ({ project, part_id, title, summary, arc }) => {
-    const root = store.projectRoot(project);
-    const results = await withCommit(
-      root,
-      () => store.createPart(project, part_id, title, summary ?? "", arc ?? ""),
-      `Created part ${part_id}: ${title}`
-    );
-    return jsonResult(results);
+    logToolCall("create_part", { project, part_id, title });
+    try {
+      const root = store.projectRoot(project);
+      const results = await withCommit(
+        root,
+        () => store.createPart(project, part_id, title, summary ?? "", arc ?? ""),
+        `Created part ${part_id}: ${title}`
+      );
+      return jsonResult(results);
+    } catch (err) {
+      logToolError("create_part", err);
+      throw err;
+    }
   });
 
   server.registerTool("create_chapter", {
     title: "Create Chapter",
-    description: "Create a new chapter (prose .md + .meta.json) inside a part and add it to the part's chapters list.",
+    description: "Create a new chapter (prose .md + .meta.json) inside a part and add it to the part's chapters list. The part must already exist (use create_part first). The chapter starts empty — use add_beat to define beats, then write_beat_prose to fill them.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier"),
@@ -149,13 +186,19 @@ function createMcpServer(): McpServer {
       timeline_position: z.string().optional().describe("Timeline position, e.g. '1996-09-14'"),
     },
   }, async ({ project, part_id, chapter_id, title, summary, pov, location, timeline_position }) => {
-    const root = store.projectRoot(project);
-    const results = await withCommit(
-      root,
-      () => store.createChapter(project, part_id, chapter_id, title, summary ?? "", pov ?? "", location ?? "", timeline_position ?? ""),
-      `Created chapter ${part_id}/${chapter_id}: ${title}`
-    );
-    return jsonResult(results);
+    logToolCall("create_chapter", { project, part_id, chapter_id, title });
+    try {
+      const root = store.projectRoot(project);
+      const results = await withCommit(
+        root,
+        () => store.createChapter(project, part_id, chapter_id, title, summary ?? "", pov ?? "", location ?? "", timeline_position ?? ""),
+        `Created chapter ${part_id}/${chapter_id}: ${title}`
+      );
+      return jsonResult(results);
+    } catch (err) {
+      logToolError("create_chapter", err);
+      throw err;
+    }
   });
 
   // =================================================================
@@ -313,64 +356,109 @@ function createMcpServer(): McpServer {
 
   server.registerTool("update_project", {
     title: "Update Project",
-    description: "Update top-level project metadata (title, logline, status, themes, parts list).",
+    description: "Update top-level project metadata. Provide only the fields you want to change — others are preserved.",
     inputSchema: {
       project: projectParam,
-      patch: z.string().describe("JSON string of fields to update in project.json"),
+      patch: z.object({
+        title: z.string().optional().describe("Project title"),
+        subtitle: z.string().nullable().optional().describe("Project subtitle"),
+        logline: z.string().optional().describe("One-sentence story summary"),
+        status: z.string().optional().describe("e.g. 'planning', 'in-progress', 'complete'"),
+        themes: z.array(z.string()).optional().describe("Thematic threads being tracked"),
+        parts: z.array(z.string()).optional().describe("Ordered part IDs, e.g. ['part-01', 'part-02']"),
+      }).describe("Fields to update in project.json. Only include fields you want to change."),
     },
   }, async ({ project, patch }) => {
-    const patchObj = JSON.parse(patch);
-    const root = store.projectRoot(project);
-    const result = await withCommit(
-      root,
-      () => store.updateProject(project, patchObj),
-      `Updated project: ${Object.keys(patchObj).join(", ")}`
-    );
-    return jsonResult(result);
+    logToolCall("update_project", { project, keys: Object.keys(patch) });
+    try {
+      const root = store.projectRoot(project);
+      const result = await withCommit(
+        root,
+        () => store.updateProject(project, patch),
+        `Updated project: ${Object.keys(patch).join(", ")}`
+      );
+      return jsonResult(result);
+    } catch (err) {
+      logToolError("update_project", err);
+      throw err;
+    }
   });
 
   server.registerTool("update_part", {
     title: "Update Part",
-    description: "Update a part's metadata (title, summary, arc, status, chapters list).",
+    description: "Update an existing part's metadata. The part must already exist — use create_part for new parts, not update_part. Provide only the fields you want to change.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier"),
-      patch: z.string().describe("JSON string of fields to update in part.json"),
+      patch: z.object({
+        title: z.string().optional().describe("Part title"),
+        summary: z.string().optional().describe("Part summary"),
+        arc: z.string().optional().describe("Arc description"),
+        status: z.string().optional().describe("'planning', 'clean', 'dirty', 'conflict'"),
+        chapters: z.array(z.string()).optional().describe("Ordered chapter IDs"),
+      }).describe("Fields to update in part.json. Only include fields you want to change."),
     },
   }, async ({ project, part_id, patch }) => {
-    const patchObj = JSON.parse(patch);
-    const root = store.projectRoot(project);
-    const result = await withCommit(
-      root,
-      () => store.updatePart(project, part_id, patchObj),
-      `Updated ${part_id}: ${Object.keys(patchObj).join(", ")}`
-    );
-    return jsonResult(result);
+    logToolCall("update_part", { project, part_id, keys: Object.keys(patch) });
+    try {
+      const root = store.projectRoot(project);
+      const result = await withCommit(
+        root,
+        () => store.updatePart(project, part_id, patch),
+        `Updated ${part_id}: ${Object.keys(patch).join(", ")}`
+      );
+      return jsonResult(result);
+    } catch (err) {
+      logToolError("update_part", err);
+      throw err;
+    }
   });
 
   server.registerTool("update_chapter_meta", {
     title: "Update Chapter Meta",
-    description: "Update a chapter's metadata — beat summaries, status, dependencies, or chapter-level fields.",
+    description: "Update a chapter's metadata. The chapter must already exist — use create_chapter first. When updating beats, provide an array with just the beats to change (matched by id); unlisted beats are untouched.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier"),
       chapter_id: z.string().describe("Chapter identifier"),
-      patch: z.string().describe("JSON string of fields to update in chapter meta"),
+      patch: z.object({
+        title: z.string().optional().describe("Chapter title"),
+        summary: z.string().optional().describe("Chapter summary"),
+        pov: z.string().optional().describe("POV character id"),
+        location: z.string().optional().describe("Location id"),
+        timeline_position: z.string().optional().describe("e.g. '1996-09-14'"),
+        status: z.string().optional().describe("'planning', 'clean', 'dirty', 'conflict'"),
+        beats: z.array(z.object({
+          id: z.string().describe("Beat identifier, e.g. 'b01'"),
+          label: z.string().optional().describe("Short beat label"),
+          summary: z.string().optional().describe("Beat summary"),
+          status: z.string().optional().describe("'planned', 'written', 'dirty', 'conflict'"),
+          dirty_reason: z.string().nullable().optional().describe("Why this beat needs review"),
+          characters: z.array(z.string()).optional().describe("Character IDs"),
+          depends_on: z.array(z.string()).optional().describe("e.g. ['chapter-01:b02']"),
+          depended_by: z.array(z.string()).optional().describe("Beat refs that depend on this"),
+        })).optional().describe("Beats to merge by ID. Unlisted beats are untouched."),
+      }).describe("Fields to update. Only include fields you want to change."),
     },
   }, async ({ project, part_id, chapter_id, patch }) => {
-    const patchObj = JSON.parse(patch);
-    const root = store.projectRoot(project);
-    const result = await withCommit(
-      root,
-      () => store.updateChapterMeta(project, part_id, chapter_id, patchObj),
-      `Updated ${part_id}/${chapter_id} meta: ${Object.keys(patchObj).join(", ")}`
-    );
-    return jsonResult(result);
+    logToolCall("update_chapter_meta", { project, part_id, chapter_id, keys: Object.keys(patch) });
+    try {
+      const root = store.projectRoot(project);
+      const result = await withCommit(
+        root,
+        () => store.updateChapterMeta(project, part_id, chapter_id, patch as Partial<store.ChapterMeta>),
+        `Updated ${part_id}/${chapter_id} meta: ${Object.keys(patch).join(", ")}`
+      );
+      return jsonResult(result);
+    } catch (err) {
+      logToolError("update_chapter_meta", err);
+      throw err;
+    }
   });
 
   server.registerTool("write_beat_prose", {
     title: "Write Beat Prose",
-    description: "Insert or replace the prose content for a specific beat in a chapter.",
+    description: "Insert or replace the prose content for a specific beat in a chapter. The beat must already exist (use add_beat first). This writes the actual narrative text.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier"),
@@ -379,34 +467,64 @@ function createMcpServer(): McpServer {
       content: z.string().describe("The prose content for this beat"),
     },
   }, async ({ project, part_id, chapter_id, beat_id, content }) => {
-    const root = store.projectRoot(project);
-    const result = await withCommit(
-      root,
-      () => store.writeBeatProse(project, part_id, chapter_id, beat_id, content),
-      `Updated ${part_id}/${chapter_id} beat ${beat_id} prose`
-    );
-    return jsonResult(result);
+    logToolCall("write_beat_prose", { project, part_id, chapter_id, beat_id, content });
+    try {
+      const root = store.projectRoot(project);
+      const result = await withCommit(
+        root,
+        () => store.writeBeatProse(project, part_id, chapter_id, beat_id, content),
+        `Updated ${part_id}/${chapter_id} beat ${beat_id} prose`
+      );
+      return jsonResult(result);
+    } catch (err) {
+      logToolError("write_beat_prose", err);
+      throw err;
+    }
   });
 
   server.registerTool("add_beat", {
     title: "Add Beat",
-    description: "Add a new beat to a chapter's structure (both the markdown marker and the meta entry).",
+    description: "Add a new beat to a chapter's structure (both the markdown marker and the meta entry). The chapter must already exist — use create_chapter first. After adding, use write_beat_prose to write its content.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier"),
       chapter_id: z.string().describe("Chapter identifier"),
-      beat: z.string().describe("JSON string of the beat definition (id, label, summary, status, characters, depends_on, depended_by)"),
+      beat: z.object({
+        id: z.string().describe("Beat identifier, e.g. 'b01'"),
+        label: z.string().describe("Short label, e.g. 'Emmy arrives at the gallery'"),
+        summary: z.string().describe("What happens in this beat"),
+        status: z.string().optional().describe("Default: 'planned'. Values: 'planned', 'written', 'dirty', 'conflict'"),
+        dirty_reason: z.string().nullable().optional().describe("Reason if dirty. Usually null for new beats."),
+        characters: z.array(z.string()).optional().describe("Character IDs, e.g. ['emmy', 'roth']"),
+        depends_on: z.array(z.string()).optional().describe("Beat refs this depends on, e.g. ['chapter-01:b02']"),
+        depended_by: z.array(z.string()).optional().describe("Beat refs that depend on this"),
+      }).describe("Beat definition. Required: id, label, summary. Others have sensible defaults."),
       after_beat_id: z.string().optional().describe("Insert after this beat ID. If omitted, appends to end."),
     },
   }, async ({ project, part_id, chapter_id, beat, after_beat_id }) => {
-    const beatDef = JSON.parse(beat);
-    const root = store.projectRoot(project);
-    const results = await withCommit(
-      root,
-      () => store.addBeat(project, part_id, chapter_id, beatDef, after_beat_id),
-      `Added beat ${beatDef.id} to ${part_id}/${chapter_id}`
-    );
-    return jsonResult(results);
+    logToolCall("add_beat", { project, part_id, chapter_id, beat_id: beat.id, after_beat_id });
+    try {
+      const beatDef: store.BeatMeta = {
+        id: beat.id,
+        label: beat.label,
+        summary: beat.summary,
+        status: beat.status ?? "planned",
+        dirty_reason: beat.dirty_reason ?? null,
+        characters: beat.characters ?? [],
+        depends_on: beat.depends_on ?? [],
+        depended_by: beat.depended_by ?? [],
+      };
+      const root = store.projectRoot(project);
+      const results = await withCommit(
+        root,
+        () => store.addBeat(project, part_id, chapter_id, beatDef, after_beat_id),
+        `Added beat ${beatDef.id} to ${part_id}/${chapter_id}`
+      );
+      return jsonResult(results);
+    } catch (err) {
+      logToolError("add_beat", err);
+      throw err;
+    }
   });
 
   server.registerTool("remove_beat", {
@@ -419,13 +537,19 @@ function createMcpServer(): McpServer {
       beat_id: z.string().describe("Beat identifier to remove"),
     },
   }, async ({ project, part_id, chapter_id, beat_id }) => {
-    const root = store.projectRoot(project);
-    const results = await withCommit(
-      root,
-      () => store.removeBeat(project, part_id, chapter_id, beat_id),
-      `Removed beat ${beat_id} from ${part_id}/${chapter_id} (prose → scratch)`
-    );
-    return jsonResult(results);
+    logToolCall("remove_beat", { project, part_id, chapter_id, beat_id });
+    try {
+      const root = store.projectRoot(project);
+      const results = await withCommit(
+        root,
+        () => store.removeBeat(project, part_id, chapter_id, beat_id),
+        `Removed beat ${beat_id} from ${part_id}/${chapter_id} (prose → scratch)`
+      );
+      return jsonResult(results);
+    } catch (err) {
+      logToolError("remove_beat", err);
+      throw err;
+    }
   });
 
   server.registerTool("mark_dirty", {
@@ -437,13 +561,19 @@ function createMcpServer(): McpServer {
       reason: z.string().describe("Why this node is dirty, e.g. 'emmy.md canon updated: tattoo backstory changed'"),
     },
   }, async ({ project, node_ref, reason }) => {
-    const root = store.projectRoot(project);
-    const results = await withCommit(
-      root,
-      () => store.markDirty(project, node_ref, reason),
-      `Marked ${node_ref} dirty (${reason})`
-    );
-    return jsonResult(results);
+    logToolCall("mark_dirty", { project, node_ref, reason });
+    try {
+      const root = store.projectRoot(project);
+      const results = await withCommit(
+        root,
+        () => store.markDirty(project, node_ref, reason),
+        `Marked ${node_ref} dirty (${reason})`
+      );
+      return jsonResult(results);
+    } catch (err) {
+      logToolError("mark_dirty", err);
+      throw err;
+    }
   });
 
   server.registerTool("mark_clean", {
@@ -454,13 +584,19 @@ function createMcpServer(): McpServer {
       node_ref: z.string().describe("Node reference to mark clean"),
     },
   }, async ({ project, node_ref }) => {
-    const root = store.projectRoot(project);
-    const results = await withCommit(
-      root,
-      () => store.markClean(project, node_ref),
-      `Marked ${node_ref} clean`
-    );
-    return jsonResult(results);
+    logToolCall("mark_clean", { project, node_ref });
+    try {
+      const root = store.projectRoot(project);
+      const results = await withCommit(
+        root,
+        () => store.markClean(project, node_ref),
+        `Marked ${node_ref} clean`
+      );
+      return jsonResult(results);
+    } catch (err) {
+      logToolError("mark_clean", err);
+      throw err;
+    }
   });
 
   server.registerTool("update_canon", {
@@ -471,17 +607,29 @@ function createMcpServer(): McpServer {
       type: z.string().describe("Canon type: 'characters', 'locations'"),
       id: z.string().describe("Canon entry id"),
       content: z.string().describe("Full markdown content for the canon file"),
-      meta: z.string().optional().describe("Optional JSON string of metadata for the sidecar"),
+      meta: z.object({
+        id: z.string().optional().describe("Canon entry id"),
+        type: z.string().optional().describe("e.g. 'character', 'location'"),
+        role: z.string().optional().describe("e.g. 'protagonist', 'mentor', 'antagonist'"),
+        appears_in: z.array(z.string()).optional().describe("Beat refs, e.g. ['part-01/chapter-01:b01']"),
+        last_updated: z.string().optional().describe("ISO timestamp"),
+        updated_by: z.string().optional().describe("e.g. 'claude-conversation'"),
+      }).passthrough().optional().describe("Optional metadata for the .meta.json sidecar"),
     },
   }, async ({ project, type, id, content, meta }) => {
-    const metaObj = meta ? JSON.parse(meta) : undefined;
-    const root = store.projectRoot(project);
-    const results = await withCommit(
-      root,
-      () => store.updateCanon(project, type, id, content, metaObj),
-      `Canon update: ${type}/${id}.md`
-    );
-    return jsonResult(results);
+    logToolCall("update_canon", { project, type, id });
+    try {
+      const root = store.projectRoot(project);
+      const results = await withCommit(
+        root,
+        () => store.updateCanon(project, type, id, content, meta),
+        `Canon update: ${type}/${id}.md`
+      );
+      return jsonResult(results);
+    } catch (err) {
+      logToolError("update_canon", err);
+      throw err;
+    }
   });
 
   server.registerTool("add_scratch", {
@@ -497,13 +645,19 @@ function createMcpServer(): McpServer {
       potential_placement: z.string().optional().describe("Where this might end up, e.g. 'part-01/chapter-04'"),
     },
   }, async ({ project, filename, content, note, characters, mood, potential_placement }) => {
-    const root = store.projectRoot(project);
-    const results = await withCommit(
-      root,
-      () => store.addScratch(project, filename, content, note, characters ?? [], mood ?? "", potential_placement ?? null),
-      `Added scratch: ${filename}`
-    );
-    return jsonResult(results);
+    logToolCall("add_scratch", { project, filename, note });
+    try {
+      const root = store.projectRoot(project);
+      const results = await withCommit(
+        root,
+        () => store.addScratch(project, filename, content, note, characters ?? [], mood ?? "", potential_placement ?? null),
+        `Added scratch: ${filename}`
+      );
+      return jsonResult(results);
+    } catch (err) {
+      logToolError("add_scratch", err);
+      throw err;
+    }
   });
 
   server.registerTool("promote_scratch", {
@@ -517,13 +671,19 @@ function createMcpServer(): McpServer {
       target_beat_id: z.string().describe("Target beat identifier"),
     },
   }, async ({ project, filename, target_part_id, target_chapter_id, target_beat_id }) => {
-    const root = store.projectRoot(project);
-    const results = await withCommit(
-      root,
-      () => store.promoteScratch(project, filename, target_part_id, target_chapter_id, target_beat_id),
-      `Promoted scratch/${filename} → ${target_part_id}/${target_chapter_id}:${target_beat_id}`
-    );
-    return jsonResult(results);
+    logToolCall("promote_scratch", { project, filename, target_part_id, target_chapter_id, target_beat_id });
+    try {
+      const root = store.projectRoot(project);
+      const results = await withCommit(
+        root,
+        () => store.promoteScratch(project, filename, target_part_id, target_chapter_id, target_beat_id),
+        `Promoted scratch/${filename} → ${target_part_id}/${target_chapter_id}:${target_beat_id}`
+      );
+      return jsonResult(results);
+    } catch (err) {
+      logToolError("promote_scratch", err);
+      throw err;
+    }
   });
 
   server.registerTool("session_summary", {
@@ -534,12 +694,18 @@ function createMcpServer(): McpServer {
       message: z.string().describe("Summary of what was accomplished in this session"),
     },
   }, async ({ project, message }) => {
-    const root = store.projectRoot(project);
-    const hash = await sessionCommit(root, message);
-    if (hash) {
-      return textResult(`Session commit created: ${hash} — ${message}`);
+    logToolCall("session_summary", { project, message });
+    try {
+      const root = store.projectRoot(project);
+      const hash = await sessionCommit(root, message);
+      if (hash) {
+        return textResult(`Session commit created: ${hash} — ${message}`);
+      }
+      return textResult("Nothing to commit — no changes since last commit.");
+    } catch (err) {
+      logToolError("session_summary", err);
+      throw err;
     }
-    return textResult("Nothing to commit — no changes since last commit.");
   });
 
   return server;
