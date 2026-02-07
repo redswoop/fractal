@@ -82,3 +82,16 @@ server.registerTool("get_chapter", {
   // your implementation
 });
 ```
+
+## Testing
+
+A comprehensive test plan lives in `fractal-test-plan.md`. It creates a disposable test project
+(`_fractal-test`) with a simple two-part story and exercises all 22+ MCP tools across 9 phases:
+
+1. **Phases 0–7**: Mechanical verification — CRUD, round-trips, search, error handling
+2. **Phase 8**: Inference verification — narrative coherence, voice consistency, data integrity
+
+To run:
+1. Ensure the server is running: `npm run dev`
+2. Execute the test plan (designed to be run by Claude via MCP tools)
+3. Test projects use the `_` prefix and route to `test-projects/` (gitignored)

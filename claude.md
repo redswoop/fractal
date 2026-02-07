@@ -406,3 +406,45 @@ Strip away the MCP server, the app, Claude, everything. What's left?
 5. A `scratch/` folder of loose ideas.
 
 You could finish the novel in VS Code and never miss the tool. That's the point.
+
+---
+
+## Testing
+
+### Test Plan
+
+`fractal-test-plan.md` contains a 9-phase verification suite. It uses a disposable test project
+(`_fractal-test`, routed to `test-projects/` automatically by the `_` prefix) with a simple
+two-part story ("Rust & Flour" — a robot opens a bakery).
+
+### Two-Layer Testing Strategy
+
+**Layer 1: Mechanical verification (Phases 0–7)** — Binary pass/fail. Call a tool, read
+the result, compare to expected. Deterministic, a script could do these:
+- Structure CRUD: create project/parts/chapters/beats, verify round-trip
+- Canon CRUD: create characters/locations, verify content and listing
+- Prose round-trip: write beat prose, read it back, verify exact match
+- Scratch operations: add, promote to beat, remove beat (backup to scratch)
+- Dirty tracking: mark dirty at beat/chapter/part level, verify reason, mark clean
+- Search: scoped search (prose/canon/scratch), unscoped, empty results
+- Error handling: nonexistent resources, duplicate IDs, invalid operations
+
+**Layer 2: Inference verification (Phase 8)** — The agent reads the full story and makes
+qualitative judgments no mechanical test can:
+- Narrative coherence: does the story flow across chapters and parts?
+- Voice-to-canon match: does Unit 7's prose match her canon voice description?
+- Character consistency: same voice throughout, no drift
+- Data bleeding: no text from one beat leaking into another
+- Dependency validity: would reversing any beat pair break the story?
+- Encoding integrity: no mojibake, no truncation, no artifacts
+
+### When to Run Tests
+
+After any change to `src/store.ts`, `src/server.ts`, or `src/git.ts`:
+1. Build check: `npx tsc --noEmit`
+2. Start the server: `npm run dev` (or restart if running)
+3. Run the full test plan against `_fractal-test`
+4. Report results with pass/fail counts and any failures
+
+For minor changes (typo fixes, comment updates), build check alone is sufficient.
+For any change that touches tool logic, data handling, or file operations — run the full suite.

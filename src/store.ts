@@ -328,6 +328,7 @@ export interface PartData {
   summary: string;
   arc: string;
   status: string;
+  dirty_reason?: string | null;
   chapters: string[];
 }
 
@@ -357,6 +358,7 @@ export interface ChapterMeta {
   location: string;
   timeline_position: string;
   status: string;
+  dirty_reason?: string | null;
   beats: BeatMeta[];
 }
 
@@ -503,7 +505,7 @@ export async function getDirtyNodes(projectId: string): Promise<DirtyNode[]> {
       continue;
     }
     if (part.status === "dirty" || part.status === "conflict") {
-      dirty.push({ ref: partId, status: part.status, dirty_reason: null });
+      dirty.push({ ref: partId, status: part.status, dirty_reason: part.dirty_reason ?? null });
     }
     for (const chapterId of part.chapters) {
       let meta: ChapterMeta;
@@ -513,7 +515,7 @@ export async function getDirtyNodes(projectId: string): Promise<DirtyNode[]> {
         continue;
       }
       if (meta.status === "dirty" || meta.status === "conflict") {
-        dirty.push({ ref: `${partId}/${chapterId}`, status: meta.status, dirty_reason: null });
+        dirty.push({ ref: `${partId}/${chapterId}`, status: meta.status, dirty_reason: meta.dirty_reason ?? null });
       }
       for (const beat of meta.beats) {
         if (beat.status === "dirty" || beat.status === "conflict") {
@@ -564,7 +566,14 @@ export async function updateChapterMeta(
   const current = await getChapterMeta(projectId, partId, chapterId);
   const updated = { ...current, ...patch };
   if (patch.beats) {
-    updated.beats = patch.beats;
+    // Merge each patch beat into the matching current beat by ID,
+    // preserving fields not present in the patch beat.
+    updated.beats = current.beats.map((currentBeat) => {
+      const patchBeat = patch.beats!.find((pb) => pb.id === currentBeat.id);
+      return patchBeat ? { ...currentBeat, ...patchBeat } : currentBeat;
+    });
+  } else {
+    updated.beats = current.beats;
   }
   const path = join(projectRoot(projectId), "parts", partId, `${chapterId}.meta.json`);
   await writeJson(path, updated);
@@ -593,12 +602,18 @@ export async function addBeat(
   afterBeatId?: string
 ): Promise<WriteResult[]> {
   const root = projectRoot(projectId);
+  const meta = await getChapterMeta(projectId, partId, chapterId);
+
+  // Reject duplicate beat IDs before making any changes
+  if (meta.beats.some((b) => b.id === beatDef.id)) {
+    throw new Error(`Beat "${beatDef.id}" already exists in ${partId}/${chapterId}.`);
+  }
+
   const mdPath = join(root, "parts", partId, `${chapterId}.md`);
   const markdown = await readMd(mdPath);
   const updated = addBeatMarker(markdown, beatDef.id, beatDef.label, afterBeatId);
   await writeMd(mdPath, updated);
 
-  const meta = await getChapterMeta(projectId, partId, chapterId);
   if (afterBeatId) {
     const idx = meta.beats.findIndex((b) => b.id === afterBeatId);
     meta.beats.splice(idx + 1, 0, beatDef);
@@ -623,13 +638,18 @@ export async function removeBeat(
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
 
+  // Verify the beat exists before attempting removal
+  const meta = await getChapterMeta(projectId, partId, chapterId);
+  if (!meta.beats.some((b) => b.id === beatId)) {
+    throw new Error(`Beat "${beatId}" not found in ${partId}/${chapterId}.`);
+  }
+
   const mdPath = join(root, "parts", partId, `${chapterId}.md`);
   const markdown = await readMd(mdPath);
   const { updated, removedProse } = removeBeatMarker(markdown, beatId);
   await writeMd(mdPath, updated);
   results.push({ path: mdPath, description: `Removed beat ${beatId} from ${chapterId}.md` });
 
-  const meta = await getChapterMeta(projectId, partId, chapterId);
   meta.beats = meta.beats.filter((b) => b.id !== beatId);
   const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
   await writeJson(metaPath, meta);
@@ -665,6 +685,7 @@ export async function markDirty(projectId: string, nodeRef: string, reason: stri
   if (parts.length === 1) {
     const part = await getPart(projectId, partId);
     part.status = "dirty";
+    part.dirty_reason = reason;
     const path = join(root, "parts", partId, "part.json");
     await writeJson(path, part);
     results.push({ path, description: `Marked ${partId} dirty: ${reason}` });
@@ -675,6 +696,7 @@ export async function markDirty(projectId: string, nodeRef: string, reason: stri
     if (!beatId) {
       const meta = await getChapterMeta(projectId, partId, chapterId!);
       meta.status = "dirty";
+      meta.dirty_reason = reason;
       const path = join(root, "parts", partId, `${chapterId}.meta.json`);
       await writeJson(path, meta);
       results.push({ path, description: `Marked ${partId}/${chapterId} dirty: ${reason}` });
@@ -703,6 +725,7 @@ export async function markClean(projectId: string, nodeRef: string): Promise<Wri
   if (parts.length === 1) {
     const part = await getPart(projectId, partId);
     part.status = "clean";
+    part.dirty_reason = null;
     const path = join(root, "parts", partId, "part.json");
     await writeJson(path, part);
     results.push({ path, description: `Marked ${partId} clean` });
@@ -713,6 +736,7 @@ export async function markClean(projectId: string, nodeRef: string): Promise<Wri
     if (!beatId) {
       const meta = await getChapterMeta(projectId, partId, chapterId!);
       meta.status = "clean";
+      meta.dirty_reason = null;
       const path = join(root, "parts", partId, `${chapterId}.meta.json`);
       await writeJson(path, meta);
       results.push({ path, description: `Marked ${partId}/${chapterId} clean` });
