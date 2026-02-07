@@ -1,5 +1,5 @@
 /**
- * Fringe — MCP Server for fractal narrative management
+ * Fractal — Multi-project MCP Server for fractal narrative management
  *
  * Remote MCP server that Claude.ai connects to as a custom connector.
  * Streamable HTTP transport over Fastify.
@@ -7,11 +7,14 @@
  * Architecture:
  *   Claude.ai  -->  HTTPS (reverse proxy)  -->  HTTP (this server, port 3001)
  *
- * Tools implement the full read/write interface defined in claude.md,
- * with automatic git commits on every write operation.
+ * Supports multiple independent projects under FRINGE_PROJECTS_ROOT.
+ * Every tool (except hello and list_projects) takes a `project` parameter.
+ * Each project has its own git repo with automatic commits on writes.
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import type { FastifyRequest, FastifyReply } from "fastify";
@@ -31,7 +34,15 @@ import { ensureGitRepo, autoCommit, sessionCommit } from "./git.js";
 const PORT = parseInt(process.env["PORT"] ?? "3001", 10);
 
 // ---------------------------------------------------------------------------
-// Helper: wrap write operations with auto-commit
+// Shared schema
+// ---------------------------------------------------------------------------
+
+const projectParam = z.string().describe(
+  "Project identifier (directory name under projects/), e.g. 'velvet-bond'"
+);
+
+// ---------------------------------------------------------------------------
+// Helpers
 // ---------------------------------------------------------------------------
 
 function textResult(text: string) {
@@ -43,14 +54,14 @@ function jsonResult(data: unknown) {
 }
 
 async function withCommit<T extends store.WriteResult | store.WriteResult[]>(
+  root: string,
   fn: () => Promise<T>,
   commitMessage: string
 ): Promise<T> {
   const result = await fn();
   const results = Array.isArray(result) ? result : [result];
-  const root = store.getProjectRoot();
   const files = results.map((r) => r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path);
-  await autoCommit(files, commitMessage);
+  await autoCommit(root, files, commitMessage);
   return result;
 }
 
@@ -60,11 +71,11 @@ async function withCommit<T extends store.WriteResult | store.WriteResult[]>(
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
-    name: "fringe",
+    name: "fractal",
     version: "1.0.0",
   });
 
-  // ===== HELLO (proof of life) =====
+  // ===== HELLO =====
 
   server.registerTool("hello", {
     title: "Hello",
@@ -74,7 +85,34 @@ function createMcpServer(): McpServer {
     },
   }, async ({ name }) => {
     const who = name ?? "Captain";
-    return textResult(`Hello from Fringe, ${who}! The connector is alive and the velvet-bond project is loaded.`);
+    return textResult(`Hello from Fractal, ${who}! The connector is alive.`);
+  });
+
+  // ===== PROJECT MANAGEMENT =====
+
+  server.registerTool("list_projects", {
+    title: "List Projects",
+    description: "List all available projects.",
+    inputSchema: {},
+  }, async () => {
+    const projects = await store.listProjects();
+    if (projects.length === 0) {
+      return textResult("No projects found. Use create_project to start one.");
+    }
+    return jsonResult(projects);
+  });
+
+  server.registerTool("create_project", {
+    title: "Create Project",
+    description: "Bootstrap a new empty project with all required directories and starter files, plus git init.",
+    inputSchema: {
+      project: projectParam,
+      title: z.string().describe("Display title for the project"),
+    },
+  }, async ({ project, title }) => {
+    const root = await store.ensureProjectStructure(project, title);
+    await ensureGitRepo(root);
+    return jsonResult({ project, root, description: `Created project "${title}" at ${root}` });
   });
 
   // =================================================================
@@ -84,9 +122,11 @@ function createMcpServer(): McpServer {
   server.registerTool("get_project", {
     title: "Get Project",
     description: "Returns the top-level project.json — title, logline, status, themes, parts list.",
-    inputSchema: {},
-  }, async () => {
-    const data = await store.getProject();
+    inputSchema: {
+      project: projectParam,
+    },
+  }, async ({ project }) => {
+    const data = await store.getProject(project);
     return jsonResult(data);
   });
 
@@ -94,10 +134,11 @@ function createMcpServer(): McpServer {
     title: "Get Part",
     description: "Returns a part's metadata — title, summary, arc, status, chapter list.",
     inputSchema: {
+      project: projectParam,
       part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
     },
-  }, async ({ part_id }) => {
-    const data = await store.getPart(part_id);
+  }, async ({ project, part_id }) => {
+    const data = await store.getPart(project, part_id);
     return jsonResult(data);
   });
 
@@ -105,11 +146,12 @@ function createMcpServer(): McpServer {
     title: "Get Chapter Meta",
     description: "Returns a chapter's metadata — title, summary, POV, location, timeline position, beat index with statuses and summaries.",
     inputSchema: {
+      project: projectParam,
       part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
       chapter_id: z.string().describe("Chapter identifier, e.g. 'chapter-01'"),
     },
-  }, async ({ part_id, chapter_id }) => {
-    const data = await store.getChapterMeta(part_id, chapter_id);
+  }, async ({ project, part_id, chapter_id }) => {
+    const data = await store.getChapterMeta(project, part_id, chapter_id);
     return jsonResult(data);
   });
 
@@ -117,11 +159,12 @@ function createMcpServer(): McpServer {
     title: "Get Chapter Prose",
     description: "Returns the full markdown prose of a chapter, including beat markers.",
     inputSchema: {
+      project: projectParam,
       part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
       chapter_id: z.string().describe("Chapter identifier, e.g. 'chapter-01'"),
     },
-  }, async ({ part_id, chapter_id }) => {
-    const data = await store.getChapterProse(part_id, chapter_id);
+  }, async ({ project, part_id, chapter_id }) => {
+    const data = await store.getChapterProse(project, part_id, chapter_id);
     return textResult(data);
   });
 
@@ -129,12 +172,13 @@ function createMcpServer(): McpServer {
     title: "Get Beat Prose",
     description: "Extracts just one beat's prose from a chapter file.",
     inputSchema: {
+      project: projectParam,
       part_id: z.string().describe("Part identifier"),
       chapter_id: z.string().describe("Chapter identifier"),
       beat_id: z.string().describe("Beat identifier, e.g. 'b01'"),
     },
-  }, async ({ part_id, chapter_id, beat_id }) => {
-    const data = await store.getBeatProse(part_id, chapter_id, beat_id);
+  }, async ({ project, part_id, chapter_id, beat_id }) => {
+    const data = await store.getBeatProse(project, part_id, chapter_id, beat_id);
     return jsonResult(data);
   });
 
@@ -142,11 +186,12 @@ function createMcpServer(): McpServer {
     title: "Get Canon",
     description: "Returns a canon file (character, location, etc.) and its metadata sidecar.",
     inputSchema: {
+      project: projectParam,
       type: z.string().describe("Canon type: 'characters', 'locations'"),
       id: z.string().describe("Canon entry id, e.g. 'emmy', 'the-gallery'"),
     },
-  }, async ({ type, id }) => {
-    const data = await store.getCanon(type, id);
+  }, async ({ project, type, id }) => {
+    const data = await store.getCanon(project, type, id);
     return jsonResult(data);
   });
 
@@ -154,19 +199,22 @@ function createMcpServer(): McpServer {
     title: "List Canon",
     description: "Lists all canon entries of a given type.",
     inputSchema: {
+      project: projectParam,
       type: z.string().describe("Canon type: 'characters', 'locations'"),
     },
-  }, async ({ type }) => {
-    const entries = await store.listCanon(type);
+  }, async ({ project, type }) => {
+    const entries = await store.listCanon(project, type);
     return jsonResult(entries);
   });
 
   server.registerTool("get_scratch_index", {
     title: "Get Scratch Index",
     description: "Returns the scratch folder index — loose scenes, dialogue riffs, ideas that don't have a home yet.",
-    inputSchema: {},
-  }, async () => {
-    const data = await store.getScratchIndex();
+    inputSchema: {
+      project: projectParam,
+    },
+  }, async ({ project }) => {
+    const data = await store.getScratchIndex(project);
     return jsonResult(data);
   });
 
@@ -174,10 +222,11 @@ function createMcpServer(): McpServer {
     title: "Get Scratch",
     description: "Returns the content of a scratch file.",
     inputSchema: {
+      project: projectParam,
       filename: z.string().describe("Scratch filename, e.g. 'emmy-rooftop-scene.md'"),
     },
-  }, async ({ filename }) => {
-    const data = await store.getScratch(filename);
+  }, async ({ project, filename }) => {
+    const data = await store.getScratch(project, filename);
     return textResult(data);
   });
 
@@ -185,11 +234,12 @@ function createMcpServer(): McpServer {
     title: "Search",
     description: "Full-text search across prose, canon, and scratch files. Returns matching lines with file paths and line numbers.",
     inputSchema: {
+      project: projectParam,
       query: z.string().describe("Search query (case-insensitive)"),
       scope: z.enum(["prose", "canon", "scratch"]).optional().describe("Limit search to a specific scope"),
     },
-  }, async ({ query, scope }) => {
-    const results = await store.search(query, scope);
+  }, async ({ project, query, scope }) => {
+    const results = await store.search(project, query, scope);
     if (results.length === 0) {
       return textResult(`No results for "${query}"`);
     }
@@ -203,9 +253,11 @@ function createMcpServer(): McpServer {
   server.registerTool("get_dirty_nodes", {
     title: "Get Dirty Nodes",
     description: "Returns all nodes with status 'dirty' or 'conflict', with reasons. Use this to triage what needs review.",
-    inputSchema: {},
-  }, async () => {
-    const nodes = await store.getDirtyNodes();
+    inputSchema: {
+      project: projectParam,
+    },
+  }, async ({ project }) => {
+    const nodes = await store.getDirtyNodes(project);
     if (nodes.length === 0) {
       return textResult("All clean. No dirty or conflicted nodes.");
     }
@@ -220,12 +272,15 @@ function createMcpServer(): McpServer {
     title: "Update Project",
     description: "Update top-level project metadata (title, logline, status, themes, parts list).",
     inputSchema: {
+      project: projectParam,
       patch: z.string().describe("JSON string of fields to update in project.json"),
     },
-  }, async ({ patch }) => {
+  }, async ({ project, patch }) => {
     const patchObj = JSON.parse(patch);
+    const root = store.projectRoot(project);
     const result = await withCommit(
-      () => store.updateProject(patchObj),
+      root,
+      () => store.updateProject(project, patchObj),
       `Updated project: ${Object.keys(patchObj).join(", ")}`
     );
     return jsonResult(result);
@@ -235,13 +290,16 @@ function createMcpServer(): McpServer {
     title: "Update Part",
     description: "Update a part's metadata (title, summary, arc, status, chapters list).",
     inputSchema: {
+      project: projectParam,
       part_id: z.string().describe("Part identifier"),
       patch: z.string().describe("JSON string of fields to update in part.json"),
     },
-  }, async ({ part_id, patch }) => {
+  }, async ({ project, part_id, patch }) => {
     const patchObj = JSON.parse(patch);
+    const root = store.projectRoot(project);
     const result = await withCommit(
-      () => store.updatePart(part_id, patchObj),
+      root,
+      () => store.updatePart(project, part_id, patchObj),
       `Updated ${part_id}: ${Object.keys(patchObj).join(", ")}`
     );
     return jsonResult(result);
@@ -251,14 +309,17 @@ function createMcpServer(): McpServer {
     title: "Update Chapter Meta",
     description: "Update a chapter's metadata — beat summaries, status, dependencies, or chapter-level fields.",
     inputSchema: {
+      project: projectParam,
       part_id: z.string().describe("Part identifier"),
       chapter_id: z.string().describe("Chapter identifier"),
       patch: z.string().describe("JSON string of fields to update in chapter meta"),
     },
-  }, async ({ part_id, chapter_id, patch }) => {
+  }, async ({ project, part_id, chapter_id, patch }) => {
     const patchObj = JSON.parse(patch);
+    const root = store.projectRoot(project);
     const result = await withCommit(
-      () => store.updateChapterMeta(part_id, chapter_id, patchObj),
+      root,
+      () => store.updateChapterMeta(project, part_id, chapter_id, patchObj),
       `Updated ${part_id}/${chapter_id} meta: ${Object.keys(patchObj).join(", ")}`
     );
     return jsonResult(result);
@@ -268,14 +329,17 @@ function createMcpServer(): McpServer {
     title: "Write Beat Prose",
     description: "Insert or replace the prose content for a specific beat in a chapter.",
     inputSchema: {
+      project: projectParam,
       part_id: z.string().describe("Part identifier"),
       chapter_id: z.string().describe("Chapter identifier"),
       beat_id: z.string().describe("Beat identifier"),
       content: z.string().describe("The prose content for this beat"),
     },
-  }, async ({ part_id, chapter_id, beat_id, content }) => {
+  }, async ({ project, part_id, chapter_id, beat_id, content }) => {
+    const root = store.projectRoot(project);
     const result = await withCommit(
-      () => store.writeBeatProse(part_id, chapter_id, beat_id, content),
+      root,
+      () => store.writeBeatProse(project, part_id, chapter_id, beat_id, content),
       `Updated ${part_id}/${chapter_id} beat ${beat_id} prose`
     );
     return jsonResult(result);
@@ -285,15 +349,18 @@ function createMcpServer(): McpServer {
     title: "Add Beat",
     description: "Add a new beat to a chapter's structure (both the markdown marker and the meta entry).",
     inputSchema: {
+      project: projectParam,
       part_id: z.string().describe("Part identifier"),
       chapter_id: z.string().describe("Chapter identifier"),
       beat: z.string().describe("JSON string of the beat definition (id, label, summary, status, characters, depends_on, depended_by)"),
       after_beat_id: z.string().optional().describe("Insert after this beat ID. If omitted, appends to end."),
     },
-  }, async ({ part_id, chapter_id, beat, after_beat_id }) => {
+  }, async ({ project, part_id, chapter_id, beat, after_beat_id }) => {
     const beatDef = JSON.parse(beat);
+    const root = store.projectRoot(project);
     const results = await withCommit(
-      () => store.addBeat(part_id, chapter_id, beatDef, after_beat_id),
+      root,
+      () => store.addBeat(project, part_id, chapter_id, beatDef, after_beat_id),
       `Added beat ${beatDef.id} to ${part_id}/${chapter_id}`
     );
     return jsonResult(results);
@@ -303,13 +370,16 @@ function createMcpServer(): McpServer {
     title: "Remove Beat",
     description: "Remove a beat from a chapter. Prose is moved to scratch for safekeeping.",
     inputSchema: {
+      project: projectParam,
       part_id: z.string().describe("Part identifier"),
       chapter_id: z.string().describe("Chapter identifier"),
       beat_id: z.string().describe("Beat identifier to remove"),
     },
-  }, async ({ part_id, chapter_id, beat_id }) => {
+  }, async ({ project, part_id, chapter_id, beat_id }) => {
+    const root = store.projectRoot(project);
     const results = await withCommit(
-      () => store.removeBeat(part_id, chapter_id, beat_id),
+      root,
+      () => store.removeBeat(project, part_id, chapter_id, beat_id),
       `Removed beat ${beat_id} from ${part_id}/${chapter_id} (prose → scratch)`
     );
     return jsonResult(results);
@@ -319,12 +389,15 @@ function createMcpServer(): McpServer {
     title: "Mark Dirty",
     description: "Flag a node (part, chapter, or beat) as needing review due to upstream changes.",
     inputSchema: {
+      project: projectParam,
       node_ref: z.string().describe("Node reference, e.g. 'part-01', 'part-01/chapter-02', 'part-01/chapter-02:b03'"),
       reason: z.string().describe("Why this node is dirty, e.g. 'emmy.md canon updated: tattoo backstory changed'"),
     },
-  }, async ({ node_ref, reason }) => {
+  }, async ({ project, node_ref, reason }) => {
+    const root = store.projectRoot(project);
     const results = await withCommit(
-      () => store.markDirty(node_ref, reason),
+      root,
+      () => store.markDirty(project, node_ref, reason),
       `Marked ${node_ref} dirty (${reason})`
     );
     return jsonResult(results);
@@ -334,11 +407,14 @@ function createMcpServer(): McpServer {
     title: "Mark Clean",
     description: "Clear dirty status after reviewing a node.",
     inputSchema: {
+      project: projectParam,
       node_ref: z.string().describe("Node reference to mark clean"),
     },
-  }, async ({ node_ref }) => {
+  }, async ({ project, node_ref }) => {
+    const root = store.projectRoot(project);
     const results = await withCommit(
-      () => store.markClean(node_ref),
+      root,
+      () => store.markClean(project, node_ref),
       `Marked ${node_ref} clean`
     );
     return jsonResult(results);
@@ -348,15 +424,18 @@ function createMcpServer(): McpServer {
     title: "Update Canon",
     description: "Create or rewrite a canon file (character, location, etc.).",
     inputSchema: {
+      project: projectParam,
       type: z.string().describe("Canon type: 'characters', 'locations'"),
       id: z.string().describe("Canon entry id"),
       content: z.string().describe("Full markdown content for the canon file"),
       meta: z.string().optional().describe("Optional JSON string of metadata for the sidecar"),
     },
-  }, async ({ type, id, content, meta }) => {
+  }, async ({ project, type, id, content, meta }) => {
     const metaObj = meta ? JSON.parse(meta) : undefined;
+    const root = store.projectRoot(project);
     const results = await withCommit(
-      () => store.updateCanon(type, id, content, metaObj),
+      root,
+      () => store.updateCanon(project, type, id, content, metaObj),
       `Canon update: ${type}/${id}.md`
     );
     return jsonResult(results);
@@ -366,6 +445,7 @@ function createMcpServer(): McpServer {
     title: "Add Scratch",
     description: "Add a new file to the scratch folder (loose scenes, ideas, dialogue riffs).",
     inputSchema: {
+      project: projectParam,
       filename: z.string().describe("Filename for the scratch file, e.g. 'emmy-bar-scene.md'"),
       content: z.string().describe("Content of the scratch file"),
       note: z.string().describe("Note about what this is and where it might go"),
@@ -373,9 +453,11 @@ function createMcpServer(): McpServer {
       mood: z.string().optional().describe("Mood/tone description"),
       potential_placement: z.string().optional().describe("Where this might end up, e.g. 'part-01/chapter-04'"),
     },
-  }, async ({ filename, content, note, characters, mood, potential_placement }) => {
+  }, async ({ project, filename, content, note, characters, mood, potential_placement }) => {
+    const root = store.projectRoot(project);
     const results = await withCommit(
-      () => store.addScratch(filename, content, note, characters ?? [], mood ?? "", potential_placement ?? null),
+      root,
+      () => store.addScratch(project, filename, content, note, characters ?? [], mood ?? "", potential_placement ?? null),
       `Added scratch: ${filename}`
     );
     return jsonResult(results);
@@ -385,14 +467,17 @@ function createMcpServer(): McpServer {
     title: "Promote Scratch",
     description: "Move a scratch file's content into a beat in the narrative structure.",
     inputSchema: {
+      project: projectParam,
       filename: z.string().describe("Scratch filename to promote"),
       target_part_id: z.string().describe("Target part identifier"),
       target_chapter_id: z.string().describe("Target chapter identifier"),
       target_beat_id: z.string().describe("Target beat identifier"),
     },
-  }, async ({ filename, target_part_id, target_chapter_id, target_beat_id }) => {
+  }, async ({ project, filename, target_part_id, target_chapter_id, target_beat_id }) => {
+    const root = store.projectRoot(project);
     const results = await withCommit(
-      () => store.promoteScratch(filename, target_part_id, target_chapter_id, target_beat_id),
+      root,
+      () => store.promoteScratch(project, filename, target_part_id, target_chapter_id, target_beat_id),
       `Promoted scratch/${filename} → ${target_part_id}/${target_chapter_id}:${target_beat_id}`
     );
     return jsonResult(results);
@@ -402,10 +487,12 @@ function createMcpServer(): McpServer {
     title: "Session Summary",
     description: "Create a session-level git commit summarizing what was done in this working session.",
     inputSchema: {
+      project: projectParam,
       message: z.string().describe("Summary of what was accomplished in this session"),
     },
-  }, async ({ message }) => {
-    const hash = await sessionCommit(message);
+  }, async ({ project, message }) => {
+    const root = store.projectRoot(project);
+    const hash = await sessionCommit(root, message);
     if (hash) {
       return textResult(`Session commit created: ${hash} — ${message}`);
     }
@@ -459,7 +546,60 @@ app.addHook("onRequest", (request, reply, done) => {
 
 // --- Health check ---
 app.get("/health", async () => {
-  return { status: "ok", project: "velvet-bond" };
+  const projects = await store.listProjects();
+  return { status: "ok", projects_root: store.getProjectsRoot(), projects };
+});
+
+// --- Help endpoint ---
+app.get("/help", async () => {
+  return {
+    name: "Fractal",
+    description: "Fractal narrative MCP server (multi-project)",
+    projects_root: store.getProjectsRoot(),
+    note: "All tools except hello and list_projects require a 'project' parameter.",
+    tools: {
+      management: {
+        hello: "Proof-of-life greeting to verify the connector is working.",
+        list_projects: "List all available projects (id, title, status).",
+        create_project: "Bootstrap a new project with all directories and starter files.",
+      },
+      read: {
+        get_project: "Top-level project metadata: title, logline, status, themes, parts list.",
+        get_part: "Part metadata: title, summary, arc, status, chapter list.",
+        get_chapter_meta: "Chapter metadata: title, summary, POV, location, timeline, beat index with statuses.",
+        get_chapter_prose: "Full markdown prose of a chapter, including beat markers.",
+        get_beat_prose: "Extract a single beat's prose from a chapter file.",
+        get_canon: "A canon file (character, location) and its metadata sidecar.",
+        list_canon: "List all canon entries of a given type (characters, locations).",
+        get_scratch_index: "Index of the scratch folder — loose scenes, dialogue, ideas.",
+        get_scratch: "Content of a specific scratch file.",
+        search: "Full-text search across prose, canon, and scratch files.",
+        get_dirty_nodes: "All nodes flagged dirty or conflict, with reasons. Use for triage.",
+      },
+      write: {
+        update_project: "Patch top-level project metadata.",
+        update_part: "Patch a part's metadata (title, summary, arc, status, chapters).",
+        update_chapter_meta: "Patch chapter metadata — beat summaries, status, dependencies.",
+        write_beat_prose: "Insert or replace prose for a specific beat.",
+        add_beat: "Add a new beat to a chapter (markdown marker + meta entry).",
+        remove_beat: "Remove a beat from a chapter. Prose is moved to scratch.",
+        mark_dirty: "Flag a node as needing review, with a reason.",
+        mark_clean: "Clear dirty status after reviewing a node.",
+        update_canon: "Create or rewrite a canon file (character, location, etc.).",
+        add_scratch: "Add a new file to the scratch folder.",
+        promote_scratch: "Move scratch content into a beat in the narrative structure.",
+      },
+      session: {
+        session_summary: "Create a session-level git commit summarizing the working session.",
+      },
+    },
+    architecture: {
+      structure: "projects/{project}/ — project.json, parts/{part}/chapter-NN.md + .meta.json, canon/, scratch/",
+      beats: "HTML comments in markdown: <!-- beat:ID | label -->. Invisible in preview, parseable by tools.",
+      versioning: "Every write auto-commits to the project's git repo with [auto] prefix.",
+      ejectability: "Without this tool, each project is a folder of markdown files, JSON sidecars, and a git repo.",
+    },
+  };
 });
 
 // ---------------------------------------------------------------------------
@@ -560,13 +700,24 @@ app.delete("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
 
 async function main() {
   try {
-    await ensureGitRepo();
+    const projectsRoot = store.getProjectsRoot();
+    if (!existsSync(projectsRoot)) {
+      await mkdir(projectsRoot, { recursive: true });
+    }
+
+    // Ensure git repos for all existing projects
+    const projects = await store.listProjects();
+    for (const p of projects) {
+      await ensureGitRepo(store.projectRoot(p.id));
+    }
 
     await app.listen({ port: PORT, host: "0.0.0.0" });
-    console.log(`\nFringe MCP server listening on http://0.0.0.0:${PORT}`);
+    console.log(`\nFractal MCP server listening on http://0.0.0.0:${PORT}`);
     console.log(`  Health check: http://localhost:${PORT}/health`);
+    console.log(`  Help:         http://localhost:${PORT}/help`);
     console.log(`  MCP endpoint: http://localhost:${PORT}/mcp`);
-    console.log(`  Project root: ${store.getProjectRoot()}\n`);
+    console.log(`  Projects:     ${projectsRoot}`);
+    console.log(`  Loaded:       ${projects.map((p) => p.id).join(", ") || "(none)"}\n`);
   } catch (err) {
     app.log.error(err);
     process.exit(1);
