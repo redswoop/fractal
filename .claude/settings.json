@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(openssl s_client:*)",
+      "Bash(openssl x509:*)"
+    ]
+  }
+}
