@@ -268,6 +268,20 @@ function createMcpServer(): McpServer {
     return jsonResult(data);
   });
 
+  server.registerTool("get_beat_variants", {
+    title: "Get Beat Variants",
+    description: "Returns all prose blocks for a given beat ID in a chapter. If a beat has multiple variant blocks (from append mode), this returns all of them in document order.",
+    inputSchema: {
+      project: projectParam,
+      part_id: z.string().describe("Part identifier"),
+      chapter_id: z.string().describe("Chapter identifier"),
+      beat_id: z.string().describe("Beat identifier, e.g. 'b01'"),
+    },
+  }, async ({ project, part_id, chapter_id, beat_id }) => {
+    const data = await store.getBeatVariants(project, part_id, chapter_id, beat_id);
+    return jsonResult(data);
+  });
+
   server.registerTool("get_canon", {
     title: "Get Canon",
     description: "Returns a canon file (character, location, etc.) and its metadata sidecar.",
@@ -458,22 +472,26 @@ function createMcpServer(): McpServer {
 
   server.registerTool("write_beat_prose", {
     title: "Write Beat Prose",
-    description: "Insert or replace the prose content for a specific beat in a chapter. The beat must already exist (use add_beat first). This writes the actual narrative text.",
+    description: "Insert or replace the prose content for a specific beat in a chapter. The beat must already exist (use add_beat first). With append=true, adds a new variant block after the existing one(s) instead of replacing.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier"),
       chapter_id: z.string().describe("Chapter identifier"),
       beat_id: z.string().describe("Beat identifier"),
       content: z.string().describe("The prose content for this beat"),
+      append: z.boolean().optional().describe(
+        "If true, append as a new variant block after existing block(s) for this beat. " +
+        "If false (default), replace the first existing block."
+      ),
     },
-  }, async ({ project, part_id, chapter_id, beat_id, content }) => {
-    logToolCall("write_beat_prose", { project, part_id, chapter_id, beat_id, content });
+  }, async ({ project, part_id, chapter_id, beat_id, content, append }) => {
+    logToolCall("write_beat_prose", { project, part_id, chapter_id, beat_id, append, content });
     try {
       const root = store.projectRoot(project);
       const result = await withCommit(
         root,
-        () => store.writeBeatProse(project, part_id, chapter_id, beat_id, content),
-        `Updated ${part_id}/${chapter_id} beat ${beat_id} prose`
+        () => store.writeBeatProse(project, part_id, chapter_id, beat_id, content, append ?? false),
+        `${append ? "Appended variant to" : "Updated"} ${part_id}/${chapter_id} beat ${beat_id} prose`
       );
       return jsonResult(result);
     } catch (err) {
@@ -529,7 +547,7 @@ function createMcpServer(): McpServer {
 
   server.registerTool("remove_beat", {
     title: "Remove Beat",
-    description: "Remove a beat from a chapter. Prose is moved to scratch for safekeeping.",
+    description: "Remove a beat from a chapter. All prose blocks (including variants) are moved to scratch for safekeeping.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier"),
@@ -548,6 +566,69 @@ function createMcpServer(): McpServer {
       return jsonResult(results);
     } catch (err) {
       logToolError("remove_beat", err);
+      throw err;
+    }
+  });
+
+  server.registerTool("select_beat_variant", {
+    title: "Select Beat Variant",
+    description: "Pick one variant of a beat as the winner, archive the rest to scratch. Use get_beat_variants first to see all variants and decide which to keep.",
+    inputSchema: {
+      project: projectParam,
+      part_id: z.string().describe("Part identifier"),
+      chapter_id: z.string().describe("Chapter identifier"),
+      beat_id: z.string().describe("Beat identifier"),
+      keep_index: z.number().describe("Zero-based index of the variant to keep (from get_beat_variants)"),
+    },
+  }, async ({ project, part_id, chapter_id, beat_id, keep_index }) => {
+    logToolCall("select_beat_variant", { project, part_id, chapter_id, beat_id, keep_index });
+    try {
+      const root = store.projectRoot(project);
+      const outcome = await store.selectBeatVariant(project, part_id, chapter_id, beat_id, keep_index);
+      // Manual commit since outcome has fields beyond WriteResult[]
+      const files = outcome.results.map((r) =>
+        r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path
+      );
+      if (files.length > 0) {
+        try {
+          await autoCommit(root, files, `Selected variant ${keep_index} for ${part_id}/${chapter_id}:${beat_id}`);
+        } catch (err) {
+          console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
+        }
+      }
+      return jsonResult({ kept: outcome.kept, archived: outcome.archived, files: outcome.results });
+    } catch (err) {
+      logToolError("select_beat_variant", err);
+      throw err;
+    }
+  });
+
+  server.registerTool("reorder_beats", {
+    title: "Reorder Beats",
+    description: "Reorder beats within a chapter. Provide the complete new ordering of beat IDs. Both the meta and prose files are updated. Variant blocks for each beat stay grouped in their original internal order.",
+    inputSchema: {
+      project: projectParam,
+      part_id: z.string().describe("Part identifier"),
+      chapter_id: z.string().describe("Chapter identifier"),
+      beat_order: z.array(z.string()).describe("Complete list of beat IDs in the desired new order. Must contain every beat ID exactly once."),
+    },
+  }, async ({ project, part_id, chapter_id, beat_order }) => {
+    logToolCall("reorder_beats", { project, part_id, chapter_id, beat_order });
+    try {
+      const root = store.projectRoot(project);
+      const outcome = await store.reorderBeats(project, part_id, chapter_id, beat_order);
+      // Manual commit since outcome has fields beyond WriteResult[]
+      const files = outcome.results.map((r) =>
+        r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path
+      );
+      try {
+        await autoCommit(root, files, `Reordered beats in ${part_id}/${chapter_id}: ${beat_order.join(", ")}`);
+      } catch (err) {
+        console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
+      }
+      return jsonResult({ previous_order: outcome.previous_order, new_order: outcome.new_order, files: outcome.results });
+    } catch (err) {
+      logToolError("reorder_beats", err);
       throw err;
     }
   });
@@ -778,8 +859,9 @@ app.get("/help", async () => {
         get_project: "Top-level project metadata: title, logline, status, themes, parts list.",
         get_part: "Part metadata: title, summary, arc, status, chapter list.",
         get_chapter_meta: "Chapter metadata: title, summary, POV, location, timeline, beat index with statuses.",
-        get_chapter_prose: "Full markdown prose of a chapter, including beat markers.",
-        get_beat_prose: "Extract a single beat's prose from a chapter file.",
+        get_chapter_prose: "Full markdown prose of a chapter, including beat markers and variants.",
+        get_beat_prose: "Extract a single beat's prose (first block only if variants exist).",
+        get_beat_variants: "Returns all prose blocks (variants) for a beat ID, in document order.",
         get_canon: "A canon file (character, location) and its metadata sidecar.",
         list_canon: "List all canon entries of a given type (characters, locations).",
         get_scratch_index: "Index of the scratch folder — loose scenes, dialogue, ideas.",
@@ -791,9 +873,11 @@ app.get("/help", async () => {
         update_project: "Patch top-level project metadata.",
         update_part: "Patch a part's metadata (title, summary, arc, status, chapters).",
         update_chapter_meta: "Patch chapter metadata — beat summaries, status, dependencies.",
-        write_beat_prose: "Insert or replace prose for a specific beat.",
+        write_beat_prose: "Insert or replace prose for a beat. With append=true, adds a variant block.",
         add_beat: "Add a new beat to a chapter (markdown marker + meta entry).",
-        remove_beat: "Remove a beat from a chapter. Prose is moved to scratch.",
+        remove_beat: "Remove a beat (all variant blocks) from a chapter. Prose moved to scratch.",
+        select_beat_variant: "Keep one variant of a beat, archive the rest to scratch.",
+        reorder_beats: "Reorder beats within a chapter (meta and prose). Variants stay grouped.",
         mark_dirty: "Flag a node as needing review, with a reason.",
         mark_clean: "Clear dirty status after reviewing a node.",
         update_canon: "Create or rewrite a canon file (character, location, etc.).",

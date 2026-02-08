@@ -163,6 +163,126 @@ function removeBeatMarker(markdown: string, beatId: string): { updated: string; 
 }
 
 // ---------------------------------------------------------------------------
+// Beat variant / reorder helpers
+// ---------------------------------------------------------------------------
+
+interface BeatBlock {
+  id: string;
+  label: string;
+  prose: string;
+}
+
+function parseBeatsGrouped(markdown: string): {
+  preamble: string;
+  blocks: BeatBlock[];
+  postamble: string;
+} {
+  const beatRegex = /<!--\s*beat:(\S+)\s*\|\s*(.+?)\s*-->/g;
+  const matches: { id: string; label: string; index: number; end: number }[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = beatRegex.exec(markdown)) !== null) {
+    matches.push({
+      id: match[1]!,
+      label: match[2]!,
+      index: match.index,
+      end: match.index + match[0].length,
+    });
+  }
+
+  if (matches.length === 0) {
+    return { preamble: markdown, blocks: [], postamble: "" };
+  }
+
+  const preamble = markdown.slice(0, matches[0]!.index);
+
+  // Find where postamble starts: the <!-- /chapter --> marker after the last beat
+  const lastMatch = matches[matches.length - 1]!;
+  const chapterEndIdx = markdown.indexOf("<!-- /chapter -->", lastMatch.end);
+  const contentEnd = chapterEndIdx !== -1 ? chapterEndIdx : markdown.length;
+  const postamble = chapterEndIdx !== -1 ? markdown.slice(chapterEndIdx) : "";
+
+  const blocks: BeatBlock[] = [];
+  for (let i = 0; i < matches.length; i++) {
+    const current = matches[i]!;
+    const nextStart = i + 1 < matches.length ? matches[i + 1]!.index : contentEnd;
+    const prose = markdown.slice(current.end, nextStart).trim();
+    blocks.push({ id: current.id, label: current.label, prose });
+  }
+
+  return { preamble, blocks, postamble };
+}
+
+function reassembleChapter(
+  preamble: string,
+  blocks: BeatBlock[],
+  postamble: string
+): string {
+  let result = preamble;
+  // Ensure preamble ends with a newline before first beat
+  if (result.length > 0 && !result.endsWith("\n")) {
+    result += "\n";
+  }
+  for (const block of blocks) {
+    result += `<!-- beat:${block.id} | ${block.label} -->\n`;
+    if (block.prose) {
+      result += `${block.prose}\n\n`;
+    } else {
+      result += "\n";
+    }
+  }
+  result += postamble;
+  return result;
+}
+
+function removeAllBeatMarkers(
+  markdown: string,
+  beatId: string
+): { updated: string; removedBlocks: { label: string; prose: string }[] } {
+  const parsed = parseBeatsGrouped(markdown);
+  const removedBlocks: { label: string; prose: string }[] = [];
+  const kept: BeatBlock[] = [];
+
+  for (const block of parsed.blocks) {
+    if (block.id === beatId) {
+      removedBlocks.push({ label: block.label, prose: block.prose });
+    } else {
+      kept.push(block);
+    }
+  }
+
+  const updated = reassembleChapter(parsed.preamble, kept, parsed.postamble);
+  return { updated, removedBlocks };
+}
+
+function appendBeatBlock(
+  markdown: string,
+  beatId: string,
+  label: string,
+  content: string
+): string {
+  const parsed = parseBeatsGrouped(markdown);
+
+  // Find the last block with this beat ID
+  let lastIdx = -1;
+  for (let i = parsed.blocks.length - 1; i >= 0; i--) {
+    if (parsed.blocks[i]!.id === beatId) {
+      lastIdx = i;
+      break;
+    }
+  }
+  if (lastIdx === -1) {
+    throw new Error(`Beat marker for ${beatId} not found in chapter file — cannot append variant`);
+  }
+
+  // Insert the new block after the last occurrence
+  const newBlock: BeatBlock = { id: beatId, label, prose: content };
+  parsed.blocks.splice(lastIdx + 1, 0, newBlock);
+
+  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble);
+}
+
+// ---------------------------------------------------------------------------
 // Project management
 // ---------------------------------------------------------------------------
 
@@ -585,13 +705,28 @@ export async function writeBeatProse(
   partId: string,
   chapterId: string,
   beatId: string,
-  content: string
+  content: string,
+  append: boolean = false
 ): Promise<WriteResult> {
   const mdPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.md`);
   const markdown = await readMd(mdPath);
-  const updated = replaceOrInsertBeatProse(markdown, beatId, content);
+
+  let updated: string;
+  if (append) {
+    const beats = parseBeats(markdown);
+    const existing = beats.find((b) => b.id === beatId);
+    if (!existing) {
+      throw new Error(`Beat marker for ${beatId} not found in chapter file — cannot append variant`);
+    }
+    updated = appendBeatBlock(markdown, beatId, existing.label, content);
+  } else {
+    updated = replaceOrInsertBeatProse(markdown, beatId, content);
+  }
   await writeMd(mdPath, updated);
-  return { path: mdPath, description: `Updated prose for ${partId}/${chapterId}:${beatId}` };
+  return {
+    path: mdPath,
+    description: `${append ? "Appended variant" : "Updated"} prose for ${partId}/${chapterId}:${beatId}`,
+  };
 }
 
 export async function addBeat(
@@ -644,36 +779,231 @@ export async function removeBeat(
     throw new Error(`Beat "${beatId}" not found in ${partId}/${chapterId}.`);
   }
 
+  // Remove ALL blocks for this beat ID from prose
   const mdPath = join(root, "parts", partId, `${chapterId}.md`);
   const markdown = await readMd(mdPath);
-  const { updated, removedProse } = removeBeatMarker(markdown, beatId);
+  const { updated, removedBlocks } = removeAllBeatMarkers(markdown, beatId);
   await writeMd(mdPath, updated);
-  results.push({ path: mdPath, description: `Removed beat ${beatId} from ${chapterId}.md` });
+  results.push({ path: mdPath, description: `Removed all blocks for beat ${beatId} from ${chapterId}.md` });
 
   meta.beats = meta.beats.filter((b) => b.id !== beatId);
   const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
   await writeJson(metaPath, meta);
   results.push({ path: metaPath, description: `Removed beat ${beatId} from ${chapterId}.meta.json` });
 
-  if (removedProse) {
+  if (removedBlocks.length > 0) {
+    const combinedProse = removedBlocks
+      .map((block, i) => {
+        if (removedBlocks.length === 1) return block.prose;
+        return `## Variant ${i}\n\n${block.prose}`;
+      })
+      .join("\n\n---\n\n");
+
     const scratchFile = `removed-${chapterId}-${beatId}.md`;
     const scratchPath = join(root, "scratch", scratchFile);
-    await writeMd(scratchPath, `# Removed beat: ${partId}/${chapterId}:${beatId}\n\n${removedProse}\n`);
+    await writeMd(scratchPath, `# Removed beat: ${partId}/${chapterId}:${beatId}\n\n${combinedProse}\n`);
 
     const scratchIndex = await getScratchIndex(projectId);
     scratchIndex.items.push({
       file: scratchFile,
-      note: `Prose removed from ${partId}/${chapterId}:${beatId}`,
+      note: `Prose removed from ${partId}/${chapterId}:${beatId} (${removedBlocks.length} block(s))`,
       characters: [],
       mood: "",
       potential_placement: null,
       created: new Date().toISOString().split("T")[0]!,
     });
     await writeJson(join(root, "scratch", "scratch.json"), scratchIndex);
-    results.push({ path: scratchPath, description: `Moved removed prose to scratch/${scratchFile}` });
+    results.push({ path: scratchPath, description: `Moved ${removedBlocks.length} removed block(s) to scratch/${scratchFile}` });
   }
 
   return results;
+}
+
+export async function getBeatVariants(
+  projectId: string,
+  partId: string,
+  chapterId: string,
+  beatId: string
+): Promise<{ beat_id: string; variants: { index: number; label: string; content: string }[] }> {
+  const meta = await getChapterMeta(projectId, partId, chapterId);
+  if (!meta.beats.some((b) => b.id === beatId)) {
+    throw new Error(`Beat "${beatId}" not found in ${partId}/${chapterId} meta.`);
+  }
+
+  const markdown = await getChapterProse(projectId, partId, chapterId);
+  const beats = parseBeats(markdown);
+  const variants = beats
+    .filter((b) => b.id === beatId)
+    .map((b, i) => ({ index: i, label: b.label, content: b.prose }));
+
+  return { beat_id: beatId, variants };
+}
+
+export async function reorderBeats(
+  projectId: string,
+  partId: string,
+  chapterId: string,
+  beatOrder: string[]
+): Promise<{ results: WriteResult[]; previous_order: string[]; new_order: string[] }> {
+  const root = projectRoot(projectId);
+  const meta = await getChapterMeta(projectId, partId, chapterId);
+  const results: WriteResult[] = [];
+
+  // Validate: no duplicates in beatOrder
+  const seen = new Set<string>();
+  for (const id of beatOrder) {
+    if (seen.has(id)) throw new Error(`Duplicate beat ID "${id}" in beat_order.`);
+    seen.add(id);
+  }
+
+  // Validate: every beatOrder ID exists in meta
+  const metaIds = new Set(meta.beats.map((b) => b.id));
+  const unknownIds = beatOrder.filter((id) => !metaIds.has(id));
+  if (unknownIds.length > 0) {
+    throw new Error(`Beat IDs not found in chapter meta: ${unknownIds.join(", ")}`);
+  }
+
+  // Validate: every meta ID is in beatOrder
+  const orderSet = new Set(beatOrder);
+  const missingIds = meta.beats.filter((b) => !orderSet.has(b.id)).map((b) => b.id);
+  if (missingIds.length > 0) {
+    throw new Error(`Beat IDs missing from beat_order: ${missingIds.join(", ")}. Provide all beats.`);
+  }
+
+  const previous_order = meta.beats.map((b) => b.id);
+
+  // Reorder meta beats
+  const beatMap = new Map(meta.beats.map((b) => [b.id, b]));
+  meta.beats = beatOrder.map((id) => beatMap.get(id)!);
+  const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
+  await writeJson(metaPath, meta);
+  results.push({ path: metaPath, description: `Reordered beats in ${partId}/${chapterId}.meta.json` });
+
+  // Reorder prose blocks (variants stay grouped in original internal order)
+  const mdPath = join(root, "parts", partId, `${chapterId}.md`);
+  const markdown = await readMd(mdPath);
+  const parsed = parseBeatsGrouped(markdown);
+
+  const blockGroups = new Map<string, BeatBlock[]>();
+  for (const block of parsed.blocks) {
+    if (!blockGroups.has(block.id)) blockGroups.set(block.id, []);
+    blockGroups.get(block.id)!.push(block);
+  }
+
+  const newBlocks: BeatBlock[] = [];
+  for (const id of beatOrder) {
+    const group = blockGroups.get(id);
+    if (group) newBlocks.push(...group);
+  }
+
+  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble);
+  await writeMd(mdPath, updated);
+  results.push({ path: mdPath, description: `Reordered beat markers in ${partId}/${chapterId}.md` });
+
+  return { results, previous_order, new_order: beatOrder };
+}
+
+export async function selectBeatVariant(
+  projectId: string,
+  partId: string,
+  chapterId: string,
+  beatId: string,
+  keepIndex: number
+): Promise<{
+  results: WriteResult[];
+  kept: { index: number; preview: string };
+  archived: { index: number; scratch_file: string }[];
+}> {
+  const root = projectRoot(projectId);
+  const results: WriteResult[] = [];
+
+  // Verify beat exists in meta
+  const meta = await getChapterMeta(projectId, partId, chapterId);
+  const beatMeta = meta.beats.find((b) => b.id === beatId);
+  if (!beatMeta) {
+    throw new Error(`Beat "${beatId}" not found in ${partId}/${chapterId} meta.`);
+  }
+
+  // Parse prose and collect variants
+  const mdPath = join(root, "parts", partId, `${chapterId}.md`);
+  const markdown = await readMd(mdPath);
+  const parsed = parseBeatsGrouped(markdown);
+  const variants = parsed.blocks
+    .map((block, globalIdx) => ({ block, globalIdx }))
+    .filter(({ block }) => block.id === beatId);
+
+  if (variants.length === 0) {
+    throw new Error(`Beat "${beatId}" has no prose blocks in the chapter file.`);
+  }
+
+  // No-op: only one variant and keepIndex is 0
+  if (variants.length === 1 && keepIndex === 0) {
+    return {
+      results: [],
+      kept: { index: 0, preview: variants[0]!.block.prose.slice(0, 100) },
+      archived: [],
+    };
+  }
+
+  if (keepIndex < 0 || keepIndex >= variants.length) {
+    throw new Error(
+      `keep_index ${keepIndex} is out of range. Beat "${beatId}" has ${variants.length} variant(s) (indices 0–${variants.length - 1}).`
+    );
+  }
+
+  // Archive non-selected variants to scratch
+  const archived: { index: number; scratch_file: string }[] = [];
+  const scratchIndex = await getScratchIndex(projectId);
+
+  for (let i = 0; i < variants.length; i++) {
+    if (i === keepIndex) continue;
+    const variant = variants[i]!;
+    const scratchFile = `${chapterId}-${beatId}-alt-${i}.md`;
+    const scratchPath = join(root, "scratch", scratchFile);
+    await writeMd(
+      scratchPath,
+      `# Archived variant ${i} from ${partId}/${chapterId}:${beatId}\n\n${variant.block.prose}\n`
+    );
+    scratchIndex.items.push({
+      file: scratchFile,
+      note: `Archived variant ${i} from ${partId}/${chapterId}:${beatId}`,
+      characters: beatMeta.characters,
+      mood: "",
+      potential_placement: null,
+      created: new Date().toISOString().split("T")[0]!,
+    });
+    archived.push({ index: i, scratch_file: scratchFile });
+    results.push({ path: scratchPath, description: `Archived variant ${i} to scratch/${scratchFile}` });
+  }
+
+  await writeJson(join(root, "scratch", "scratch.json"), scratchIndex);
+  results.push({ path: join(root, "scratch", "scratch.json"), description: "Updated scratch index" });
+
+  // Rebuild chapter with only the winning block
+  const keptBlock = variants[keepIndex]!.block;
+  const newBlocks: BeatBlock[] = [];
+  let inserted = false;
+  for (const block of parsed.blocks) {
+    if (block.id === beatId) {
+      if (!inserted) {
+        newBlocks.push(keptBlock);
+        inserted = true;
+      }
+      // Skip all other variants
+    } else {
+      newBlocks.push(block);
+    }
+  }
+
+  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble);
+  await writeMd(mdPath, updated);
+  results.push({ path: mdPath, description: `Selected variant ${keepIndex} for ${beatId} in ${chapterId}.md` });
+
+  return {
+    results,
+    kept: { index: keepIndex, preview: keptBlock.prose.slice(0, 100) },
+    archived,
+  };
 }
 
 export async function markDirty(projectId: string, nodeRef: string, reason: string): Promise<WriteResult[]> {
