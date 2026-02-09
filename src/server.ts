@@ -251,7 +251,11 @@ function createMcpServer(): McpServer {
     },
   }, async ({ project, part_id, chapter_id }) => {
     const data = await store.getChapterProse(project, part_id, chapter_id);
-    return textResult(data);
+    const root = store.projectRoot(project);
+    const relPath = `parts/${part_id}/${chapter_id}.md`;
+    const { getFileVersion } = await import("./git.js");
+    const version = await getFileVersion(root, relPath);
+    return jsonResult({ prose: data, version });
   });
 
   server.registerTool("get_beat_prose", {
@@ -362,6 +366,32 @@ function createMcpServer(): McpServer {
       return textResult("All clean. No dirty or conflicted nodes.");
     }
     return jsonResult(nodes);
+  });
+
+  server.registerTool("get_context", {
+    title: "Get Context",
+    description:
+      "Batch read that returns a bundle of project data in one call. " +
+      "Pass a shopping list of canon IDs, beat refs, scratch filenames, etc. " +
+      "Use this instead of multiple individual get_ calls. " +
+      "Partial failure — missing items go to errors, everything else returns normally.",
+    inputSchema: {
+      project: projectParam,
+      include: z.object({
+        canon: z.array(z.string()).optional().describe("Canon IDs to load, e.g. ['emmy', 'the-gallery']. Type (character/location) is inferred."),
+        scratch: z.array(z.string()).optional().describe("Scratch filenames, e.g. ['voice-codex.md']"),
+        parts: z.array(z.string()).optional().describe("Part IDs, e.g. ['part-01']"),
+        chapter_meta: z.array(z.string()).optional().describe("Chapter refs, e.g. ['part-01/chapter-03']"),
+        chapter_prose: z.array(z.string()).optional().describe("Full chapter prose refs, e.g. ['part-01/chapter-03']"),
+        beats: z.array(z.string()).optional().describe("Beat refs, e.g. ['part-01/chapter-03:b01']"),
+        beat_variants: z.array(z.string()).optional().describe("Beat refs for variant listing, e.g. ['part-01/chapter-03:b03']"),
+        dirty_nodes: z.boolean().optional().describe("Include all dirty/conflict nodes"),
+        project_meta: z.boolean().optional().describe("Include top-level project metadata"),
+      }).describe("What to include. Every key is optional. Request exactly what you need."),
+    },
+  }, async ({ project, include }) => {
+    const data = await store.getContext(project, include);
+    return jsonResult(data);
   });
 
   // =================================================================
@@ -496,6 +526,45 @@ function createMcpServer(): McpServer {
       return jsonResult(result);
     } catch (err) {
       logToolError("write_beat_prose", err);
+      throw err;
+    }
+  });
+
+  server.registerTool("edit_beat_prose", {
+    title: "Edit Beat Prose",
+    description:
+      "Surgical string replacement within a beat's prose. " +
+      "Supports multiple ordered find/replace pairs, applied atomically — if any edit fails, none are applied. " +
+      "Use this instead of write_beat_prose when changing words or sentences rather than rewriting the whole beat.",
+    inputSchema: {
+      project: projectParam,
+      part_id: z.string().describe("Part identifier"),
+      chapter_id: z.string().describe("Chapter identifier"),
+      beat_id: z.string().describe("Beat identifier"),
+      edits: z.array(z.object({
+        old_str: z.string().describe("Exact text to find (must match exactly once within the beat)"),
+        new_str: z.string().describe("Replacement text (empty string = deletion)"),
+      })).describe("Ordered list of find/replace pairs. Applied sequentially — edit 2 sees the result of edit 1."),
+      variant_index: z.number().optional().describe("Which variant to edit (default: 0 = first/only block)"),
+    },
+  }, async ({ project, part_id, chapter_id, beat_id, edits, variant_index }) => {
+    logToolCall("edit_beat_prose", { project, part_id, chapter_id, beat_id, edits_count: edits.length });
+    try {
+      const root = store.projectRoot(project);
+      const outcome = await store.editBeatProse(
+        project, part_id, chapter_id, beat_id, edits, variant_index ?? 0
+      );
+      const files = [outcome.result.path.startsWith(root)
+        ? outcome.result.path.slice(root.length + 1) : outcome.result.path];
+      try {
+        await autoCommit(root, files,
+          `Edited ${part_id}/${chapter_id}:${beat_id} (${outcome.edits_applied} edits)`);
+      } catch (err) {
+        console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
+      }
+      return jsonResult(outcome);
+    } catch (err) {
+      logToolError("edit_beat_prose", err);
       throw err;
     }
   });
@@ -767,6 +836,176 @@ function createMcpServer(): McpServer {
     }
   });
 
+  // -----------------------------------------------------------------------
+  // Annotation tools
+  // -----------------------------------------------------------------------
+
+  server.registerTool("get_notes", {
+    title: "Get Notes",
+    description:
+      "Scan prose files for inline annotations (@note, @dev, @line, @continuity, @query, @flag). " +
+      "Returns structured notes with location context and surrounding prose lines, plus a summary with counts by type and author. " +
+      "Scope can be a part, chapter, or beat reference to narrow the scan.",
+    inputSchema: {
+      project: projectParam,
+      scope: z.string().optional().describe(
+        "Scope filter: 'part-01' (all chapters in part), 'part-01/chapter-03' (one chapter), or 'part-01/chapter-03:b02' (one beat). Omit to scan entire project."
+      ),
+      type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).optional().describe(
+        "Filter by annotation type"
+      ),
+      author: z.enum(["human", "claude"]).optional().describe(
+        "Filter by author"
+      ),
+    },
+  }, async ({ project, scope, type, author }) => {
+    const data = await store.getAnnotations(project, scope, type, author);
+    if (data.notes.length === 0) {
+      return textResult("No annotations found" + (scope ? ` in ${scope}` : "") + ".");
+    }
+    return jsonResult(data);
+  });
+
+  server.registerTool("add_note", {
+    title: "Add Note",
+    description:
+      "Insert an inline annotation in a chapter's prose, anchored after a specific line number. " +
+      "Author is automatically set to 'claude'. The annotation is an HTML comment invisible in rendered markdown. " +
+      "Optionally pass a version token (from get_notes or a previous add_note) for line-number translation if the file changed.",
+    inputSchema: {
+      project: projectParam,
+      part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
+      chapter_id: z.string().describe("Chapter identifier, e.g. 'chapter-03'"),
+      line_number: z.number().describe("Line number to insert annotation after (1-based)"),
+      type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).describe(
+        "Annotation type: 'note' (general), 'dev' (structural), 'line' (prose craft), 'continuity' (consistency), 'query' (question), 'flag' (wordless marker)"
+      ),
+      message: z.string().optional().describe(
+        "The annotation message. Required for all types except 'flag'."
+      ),
+      version: z.string().optional().describe(
+        "Version token from get_notes or previous add_note. If the file changed since this version, line numbers are translated automatically. Omit on first insert."
+      ),
+    },
+  }, async ({ project, part_id, chapter_id, line_number, type, message, version }) => {
+    logToolCall("add_note", { project, part_id, chapter_id, line_number, type });
+    try {
+      if (type !== "flag" && !message) {
+        throw new Error(`Message is required for @${type} annotations.`);
+      }
+      const root = store.projectRoot(project);
+      const result = await store.insertAnnotation(
+        project, part_id, chapter_id, line_number,
+        type as "note" | "dev" | "line" | "continuity" | "query" | "flag",
+        message ?? null, "claude", version
+      );
+
+      // Commit the modified file
+      const relPath = result.path.startsWith(root)
+        ? result.path.slice(root.length + 1)
+        : result.path;
+      try {
+        await autoCommit(root, [relPath],
+          `Added @${type}(claude) annotation to ${part_id}/${chapter_id}`);
+      } catch (err) {
+        console.error(`[git-warning] Auto-commit failed:`,
+          err instanceof Error ? err.message : err);
+      }
+
+      // Get post-commit version
+      const { getFileVersion } = await import("./git.js");
+      const newVersion = await getFileVersion(root, relPath);
+
+      return jsonResult({
+        id: result.id,
+        inserted_after_line: result.inserted_after_line,
+        location: `${part_id}/${chapter_id}`,
+        version: newVersion,
+      });
+    } catch (err) {
+      logToolError("add_note", err);
+      throw err;
+    }
+  });
+
+  server.registerTool("resolve_note", {
+    title: "Resolve Note",
+    description:
+      "Remove a single inline annotation from a prose file after it's been addressed. " +
+      "Pass the note ID from get_notes. The annotation line is deleted from the markdown. Git remembers it. " +
+      "Note: resolving one note shifts line numbers, making other note IDs from the same get_notes call stale. " +
+      "Either batch-resolve with resolve_notes, or re-read with get_notes between individual resolves.",
+    inputSchema: {
+      project: projectParam,
+      note_id: z.string().describe(
+        "Note ID to resolve, e.g. 'part-01/chapter-03:b02:n47'. Get this from get_notes."
+      ),
+    },
+  }, async ({ project, note_id }) => {
+    logToolCall("resolve_note", { project, note_id });
+    try {
+      const root = store.projectRoot(project);
+      const results = await store.removeAnnotationLines(project, [note_id]);
+      const files = results.map((r) =>
+        r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path
+      );
+      if (files.length > 0) {
+        try {
+          await autoCommit(root, files, `Resolved annotation ${note_id}`);
+        } catch (err) {
+          console.error(`[git-warning] Auto-commit failed:`,
+            err instanceof Error ? err.message : err);
+        }
+      }
+      return jsonResult({ resolved: 1, note_id });
+    } catch (err) {
+      logToolError("resolve_note", err);
+      throw err;
+    }
+  });
+
+  server.registerTool("resolve_notes", {
+    title: "Resolve Notes",
+    description:
+      "Batch-remove multiple inline annotations from prose files after they've been addressed. " +
+      "Pass note IDs from get_notes.",
+    inputSchema: {
+      project: projectParam,
+      note_ids: z.array(z.string()).describe(
+        "Note IDs to resolve, e.g. ['part-01/chapter-03:b02:n47']. Get these from get_notes."
+      ),
+    },
+  }, async ({ project, note_ids }) => {
+    logToolCall("resolve_notes", { project, count: note_ids.length });
+    try {
+      if (note_ids.length === 0) {
+        return textResult("No note IDs provided. Nothing to resolve.");
+      }
+      const root = store.projectRoot(project);
+      const results = await store.removeAnnotationLines(project, note_ids);
+      const files = results.map((r) =>
+        r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path
+      );
+      if (files.length > 0) {
+        try {
+          await autoCommit(root, files,
+            `Resolved ${note_ids.length} annotation(s)`);
+        } catch (err) {
+          console.error(`[git-warning] Auto-commit failed:`,
+            err instanceof Error ? err.message : err);
+        }
+      }
+      return jsonResult({ resolved: note_ids.length, files_modified: results.length });
+    } catch (err) {
+      logToolError("resolve_notes", err);
+      throw err;
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Session tools
+  // -----------------------------------------------------------------------
+
   server.registerTool("session_summary", {
     title: "Session Summary",
     description: "Create a session-level git commit summarizing what was done in this working session.",
@@ -859,7 +1098,7 @@ app.get("/help", async () => {
         get_project: "Top-level project metadata: title, logline, status, themes, parts list.",
         get_part: "Part metadata: title, summary, arc, status, chapter list.",
         get_chapter_meta: "Chapter metadata: title, summary, POV, location, timeline, beat index with statuses.",
-        get_chapter_prose: "Full markdown prose of a chapter, including beat markers and variants.",
+        get_chapter_prose: "Full markdown prose of a chapter, including beat markers and variants. Returns {prose, version}.",
         get_beat_prose: "Extract a single beat's prose (first block only if variants exist).",
         get_beat_variants: "Returns all prose blocks (variants) for a beat ID, in document order.",
         get_canon: "A canon file (character, location) and its metadata sidecar.",
@@ -868,12 +1107,14 @@ app.get("/help", async () => {
         get_scratch: "Content of a specific scratch file.",
         search: "Full-text search across prose, canon, and scratch files.",
         get_dirty_nodes: "All nodes flagged dirty or conflict, with reasons. Use for triage.",
+        get_context: "Batch read — canon, scratch, parts, chapters, beats, variants, dirty nodes in one call.",
       },
       write: {
         update_project: "Patch top-level project metadata.",
         update_part: "Patch a part's metadata (title, summary, arc, status, chapters).",
         update_chapter_meta: "Patch chapter metadata — beat summaries, status, dependencies.",
         write_beat_prose: "Insert or replace prose for a beat. With append=true, adds a variant block.",
+        edit_beat_prose: "Surgical str_replace within a beat's prose. Atomic, ordered edits.",
         add_beat: "Add a new beat to a chapter (markdown marker + meta entry).",
         remove_beat: "Remove a beat (all variant blocks) from a chapter. Prose moved to scratch.",
         select_beat_variant: "Keep one variant of a beat, archive the rest to scratch.",
@@ -883,6 +1124,12 @@ app.get("/help", async () => {
         update_canon: "Create or rewrite a canon file (character, location, etc.).",
         add_scratch: "Add a new file to the scratch folder.",
         promote_scratch: "Move scratch content into a beat in the narrative structure.",
+      },
+      annotations: {
+        get_notes: "Scan prose for inline annotations. Filter by scope, type, author. Returns version hashes.",
+        add_note: "Insert annotation after a line number. Optionally pass version for line translation. Author: claude.",
+        resolve_note: "Remove a single annotation after it's been addressed.",
+        resolve_notes: "Batch-remove multiple annotations.",
       },
       session: {
         session_summary: "Create a session-level git commit summarizing the working session.",

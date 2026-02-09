@@ -74,6 +74,36 @@ async function writeMd(path: string, content: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Annotation types
+// ---------------------------------------------------------------------------
+
+const ANNOTATION_TYPES = ["note", "dev", "line", "continuity", "query", "flag"] as const;
+type AnnotationType = (typeof ANNOTATION_TYPES)[number];
+const ANNOTATION_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*?))?\s*-->$/;
+const BEAT_MARKER_REGEX = /^<!--\s*beat:(\S+)\s*\|\s*(.+?)\s*-->/;
+
+export interface ParsedAnnotation {
+  id: string;
+  type: AnnotationType;
+  author: string;
+  message: string | null;
+  location: { part: string; chapter: string; beat: string; line_number: number };
+  context: { before: string | null; after: string | null };
+}
+
+export interface AnnotationSummary {
+  total: number;
+  by_type: Record<string, number>;
+  by_author: Record<string, number>;
+}
+
+export interface GetAnnotationsResult {
+  notes: ParsedAnnotation[];
+  summary: AnnotationSummary;
+  versions: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
 // Beat prose parsing
 // ---------------------------------------------------------------------------
 
@@ -529,6 +559,46 @@ export async function listCanon(projectId: string, type: string): Promise<string
     .map((f) => f.replace(/\.md$/, ""));
 }
 
+async function resolveCanon(
+  projectId: string,
+  id: string
+): Promise<{ content: string; meta: unknown; type: string } | null> {
+  const root = projectRoot(projectId);
+  for (const type of ["characters", "locations"]) {
+    const mdPath = join(root, "canon", type, `${id}.md`);
+    if (existsSync(mdPath)) {
+      const content = await readMd(mdPath);
+      let meta: unknown = null;
+      const metaPath = join(root, "canon", type, `${id}.meta.json`);
+      if (existsSync(metaPath)) {
+        meta = await readJson(metaPath);
+      }
+      return { content, meta, type };
+    }
+  }
+  return null;
+}
+
+function parseChapterRef(ref: string): { partId: string; chapterId: string } {
+  const parts = ref.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error(`Invalid chapter ref "${ref}". Expected format: "part-01/chapter-01"`);
+  }
+  return { partId: parts[0], chapterId: parts[1] };
+}
+
+function parseBeatRef(ref: string): { partId: string; chapterId: string; beatId: string } {
+  const parts = ref.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error(`Invalid beat ref "${ref}". Expected format: "part-01/chapter-01:b01"`);
+  }
+  const [chapterId, beatId] = parts[1].split(":");
+  if (!chapterId || !beatId) {
+    throw new Error(`Invalid beat ref "${ref}". Expected format: "part-01/chapter-01:b01"`);
+  }
+  return { partId: parts[0], chapterId, beatId };
+}
+
 // ---------------------------------------------------------------------------
 // Scratch reads
 // ---------------------------------------------------------------------------
@@ -650,6 +720,363 @@ export async function getDirtyNodes(projectId: string): Promise<DirtyNode[]> {
   }
 
   return dirty;
+}
+
+// ---------------------------------------------------------------------------
+// Annotation parsing & manipulation
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse all inline annotations from a chapter's markdown.
+ * Pure function — no I/O. Walks lines top-to-bottom tracking beat context.
+ */
+export function parseAnnotations(
+  markdown: string,
+  partId: string,
+  chapterId: string
+): ParsedAnnotation[] {
+  const lines = markdown.split("\n");
+  const annotations: ParsedAnnotation[] = [];
+  let currentBeat = "none";
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+
+    // Track current beat
+    const beatMatch = BEAT_MARKER_REGEX.exec(line);
+    if (beatMatch) {
+      currentBeat = beatMatch[1]!;
+      continue;
+    }
+
+    // Check for annotation
+    const annoMatch = ANNOTATION_REGEX.exec(line);
+    if (!annoMatch) continue;
+
+    const lineNumber = i + 1; // 1-based
+    const type = annoMatch[1]! as AnnotationType;
+    const author = annoMatch[2] ?? "human";
+    const message = annoMatch[3] ?? null;
+
+    // Context: scan for nearest non-empty, non-annotation, non-marker prose line
+    let before: string | null = null;
+    for (let b = i - 1; b >= 0; b--) {
+      const bLine = lines[b]!.trim();
+      if (!bLine) continue;
+      if (ANNOTATION_REGEX.test(bLine)) continue;
+      if (BEAT_MARKER_REGEX.test(bLine)) break;
+      if (bLine === "<!-- /chapter -->") break;
+      before = bLine;
+      break;
+    }
+
+    let after: string | null = null;
+    for (let a = i + 1; a < lines.length; a++) {
+      const aLine = lines[a]!.trim();
+      if (!aLine) continue;
+      if (ANNOTATION_REGEX.test(aLine)) continue;
+      if (BEAT_MARKER_REGEX.test(aLine)) break;
+      if (aLine === "<!-- /chapter -->") break;
+      after = aLine;
+      break;
+    }
+
+    annotations.push({
+      id: `${partId}/${chapterId}:${currentBeat}:n${lineNumber}`,
+      type,
+      author,
+      message,
+      location: { part: partId, chapter: chapterId, beat: currentBeat, line_number: lineNumber },
+      context: { before, after },
+    });
+  }
+
+  return annotations;
+}
+
+/**
+ * Parse a note ID into its components.
+ * Format: "part-01/chapter-03:b02:n47"
+ */
+function parseNoteId(noteId: string): {
+  partId: string;
+  chapterId: string;
+  beatId: string;
+  lineNumber: number;
+} {
+  const slashIdx = noteId.indexOf("/");
+  if (slashIdx === -1) {
+    throw new Error(`Invalid note ID "${noteId}". Expected format: "part-01/chapter-03:b02:n47"`);
+  }
+  const partId = noteId.slice(0, slashIdx);
+  const rest = noteId.slice(slashIdx + 1);
+  const colonParts = rest.split(":");
+  if (colonParts.length !== 3) {
+    throw new Error(`Invalid note ID "${noteId}". Expected format: "part-01/chapter-03:b02:n47"`);
+  }
+  const chapterId = colonParts[0]!;
+  const beatId = colonParts[1]!;
+  const lineStr = colonParts[2]!;
+  if (!lineStr.startsWith("n")) {
+    throw new Error(`Invalid note ID "${noteId}". Line segment must start with 'n'`);
+  }
+  const lineNumber = parseInt(lineStr.slice(1), 10);
+  if (isNaN(lineNumber) || lineNumber < 1) {
+    throw new Error(`Invalid line number in note ID "${noteId}"`);
+  }
+  return { partId, chapterId, beatId, lineNumber };
+}
+
+/**
+ * Build an annotation HTML comment string.
+ */
+function buildAnnotationComment(
+  type: AnnotationType,
+  author: string,
+  message: string | null
+): string {
+  const authorPart = author !== "human" ? `(${author})` : "";
+  if (type === "flag") {
+    return authorPart ? `<!-- @flag${authorPart} -->` : `<!-- @flag -->`;
+  }
+  return `<!-- @${type}${authorPart}: ${message} -->`;
+}
+
+/**
+ * Parse a scope string into part/chapter/beat components.
+ * Accepts: "part-01", "part-01/chapter-03", "part-01/chapter-03:b02"
+ */
+function parseScopeRef(scope: string): {
+  partId: string;
+  chapterId?: string;
+  beatId?: string;
+} {
+  const slashIdx = scope.indexOf("/");
+  if (slashIdx === -1) {
+    return { partId: scope };
+  }
+  const partId = scope.slice(0, slashIdx);
+  const rest = scope.slice(slashIdx + 1);
+  const colonIdx = rest.indexOf(":");
+  if (colonIdx === -1) {
+    return { partId, chapterId: rest };
+  }
+  return { partId, chapterId: rest.slice(0, colonIdx), beatId: rest.slice(colonIdx + 1) };
+}
+
+/**
+ * Get annotations across chapters, with optional filtering.
+ */
+export async function getAnnotations(
+  projectId: string,
+  scope?: string,
+  type?: string,
+  author?: string
+): Promise<GetAnnotationsResult> {
+  const root = projectRoot(projectId);
+  let chaptersToScan: { partId: string; chapterId: string }[] = [];
+  let beatFilter: string | undefined;
+
+  if (scope) {
+    const ref = parseScopeRef(scope);
+    beatFilter = ref.beatId;
+
+    if (ref.chapterId) {
+      chaptersToScan = [{ partId: ref.partId, chapterId: ref.chapterId }];
+    } else {
+      // Scan all chapters in a part
+      const part = await getPart(projectId, ref.partId);
+      chaptersToScan = part.chapters.map((ch: string) => ({ partId: ref.partId, chapterId: ch }));
+    }
+  } else {
+    // Scan entire project
+    const project = await getProject(projectId);
+    for (const partId of project.parts) {
+      try {
+        const part = await getPart(projectId, partId);
+        for (const chapterId of part.chapters) {
+          chaptersToScan.push({ partId, chapterId });
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  let allNotes: ParsedAnnotation[] = [];
+  const versions: Record<string, string> = {};
+
+  for (const { partId, chapterId } of chaptersToScan) {
+    try {
+      const mdPath = join(root, "parts", partId, `${chapterId}.md`);
+      const markdown = await readMd(mdPath);
+      const notes = parseAnnotations(markdown, partId, chapterId);
+      allNotes.push(...notes);
+
+      const relPath = join("parts", partId, `${chapterId}.md`);
+      const { getFileVersion } = await import("./git.js");
+      versions[`${partId}/${chapterId}`] = await getFileVersion(root, relPath);
+    } catch {
+      continue;
+    }
+  }
+
+  // Apply filters
+  if (beatFilter) {
+    allNotes = allNotes.filter((n) => n.location.beat === beatFilter);
+  }
+  if (type) {
+    allNotes = allNotes.filter((n) => n.type === type);
+  }
+  if (author) {
+    allNotes = allNotes.filter((n) => n.author === author);
+  }
+
+  // Build summary
+  const by_type: Record<string, number> = {};
+  const by_author: Record<string, number> = {};
+  for (const note of allNotes) {
+    by_type[note.type] = (by_type[note.type] ?? 0) + 1;
+    by_author[note.author] = (by_author[note.author] ?? 0) + 1;
+  }
+
+  return {
+    notes: allNotes,
+    summary: { total: allNotes.length, by_type, by_author },
+    versions,
+  };
+}
+
+/**
+ * Insert an annotation after a specific line in a chapter.
+ * Optionally accepts a version token for line-number translation.
+ */
+export async function insertAnnotation(
+  projectId: string,
+  partId: string,
+  chapterId: string,
+  lineNumber: number,
+  type: AnnotationType,
+  message: string | null,
+  author: string,
+  version?: string
+): Promise<WriteResult & { id: string; inserted_after_line: number; version: string }> {
+  const root = projectRoot(projectId);
+  const relPath = join("parts", partId, `${chapterId}.md`);
+  const mdPath = join(root, relPath);
+  const markdown = await readMd(mdPath);
+
+  const { getFileVersion, translateLineNumber } = await import("./git.js");
+  const currentVersion = await getFileVersion(root, relPath);
+
+  let targetLine = lineNumber;
+
+  // Version-based line translation
+  if (version && version !== currentVersion) {
+    const translated = await translateLineNumber(root, relPath, version, currentVersion, lineNumber);
+    if (translated === null) {
+      throw new Error(
+        `Line ${lineNumber} in version ${version} cannot be mapped to current file (${currentVersion}) — re-read the chapter.`
+      );
+    }
+    targetLine = translated;
+  }
+
+  const lines = markdown.split("\n");
+
+  // Validate line range
+  if (targetLine < 1 || targetLine > lines.length) {
+    throw new Error(
+      `Line ${targetLine} is out of range. File has ${lines.length} lines.`
+    );
+  }
+
+  // Determine which beat this line falls in (scan backwards)
+  let beatId = "none";
+  for (let i = targetLine - 1; i >= 0; i--) {
+    const match = BEAT_MARKER_REGEX.exec(lines[i]!.trim());
+    if (match) {
+      beatId = match[1]!;
+      break;
+    }
+  }
+
+  // Build and insert annotation
+  const comment = buildAnnotationComment(type, author, message);
+  // Insert after the target line (index = targetLine since lines are 0-indexed)
+  lines.splice(targetLine, 0, comment);
+
+  await writeMd(mdPath, lines.join("\n"));
+
+  const insertedLine = targetLine + 1; // 1-based line number of the inserted annotation
+  const id = `${partId}/${chapterId}:${beatId}:n${insertedLine}`;
+
+  return {
+    path: mdPath,
+    description: `Added @${type}(${author}) annotation to ${partId}/${chapterId}:${beatId}`,
+    id,
+    inserted_after_line: targetLine,
+    version: currentVersion, // Will be updated to post-commit version by server handler
+  };
+}
+
+/**
+ * Remove annotation lines from chapter files by note IDs.
+ * Uses filtering (not sequential deletion) to avoid line-shifting issues.
+ */
+export async function removeAnnotationLines(
+  projectId: string,
+  noteIds: string[]
+): Promise<WriteResult[]> {
+  if (noteIds.length === 0) return [];
+
+  const root = projectRoot(projectId);
+
+  // Group by chapter file
+  const byChapter = new Map<string, { partId: string; chapterId: string; lineNumbers: number[] }>();
+  for (const noteId of noteIds) {
+    const { partId, chapterId, lineNumber } = parseNoteId(noteId);
+    const key = `${partId}/${chapterId}`;
+    if (!byChapter.has(key)) {
+      byChapter.set(key, { partId, chapterId, lineNumbers: [] });
+    }
+    byChapter.get(key)!.lineNumbers.push(lineNumber);
+  }
+
+  const results: WriteResult[] = [];
+
+  for (const [, { partId, chapterId, lineNumbers }] of byChapter) {
+    const mdPath = join(root, "parts", partId, `${chapterId}.md`);
+    const markdown = await readMd(mdPath);
+    const lines = markdown.split("\n");
+
+    // Verify each target line is actually an annotation
+    for (const ln of lineNumbers) {
+      if (ln < 1 || ln > lines.length) {
+        throw new Error(
+          `Line ${ln} is out of range in ${partId}/${chapterId}. File has ${lines.length} lines.`
+        );
+      }
+      const content = lines[ln - 1]!.trim();
+      if (!ANNOTATION_REGEX.test(content)) {
+        throw new Error(
+          `Line ${ln} is not an annotation: '${content}'. Notes may have shifted — re-read with get_notes.`
+        );
+      }
+    }
+
+    // Filter out annotation lines
+    const toRemove = new Set(lineNumbers);
+    const filtered = lines.filter((_, i) => !toRemove.has(i + 1));
+    await writeMd(mdPath, filtered.join("\n"));
+
+    results.push({
+      path: mdPath,
+      description: `Resolved ${lineNumbers.length} annotation(s) in ${partId}/${chapterId}`,
+    });
+  }
+
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,6 +1430,257 @@ export async function selectBeatVariant(
     results,
     kept: { index: keepIndex, preview: keptBlock.prose.slice(0, 100) },
     archived,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Batch context read
+// ---------------------------------------------------------------------------
+
+export interface ContextInclude {
+  canon?: string[];
+  scratch?: string[];
+  parts?: string[];
+  chapter_meta?: string[];
+  chapter_prose?: string[];
+  beats?: string[];
+  beat_variants?: string[];
+  dirty_nodes?: boolean;
+  project_meta?: boolean;
+}
+
+export async function getContext(
+  projectId: string,
+  include: ContextInclude
+): Promise<Record<string, unknown>> {
+  const response: Record<string, unknown> = {};
+  const errors: Record<string, string> = {};
+
+  // Canon — resolve type automatically
+  if (include.canon && include.canon.length > 0) {
+    const canon: Record<string, unknown> = {};
+    await Promise.all(include.canon.map(async (id) => {
+      try {
+        const result = await resolveCanon(projectId, id);
+        if (result) {
+          canon[id] = result;
+        } else {
+          errors[`canon:${id}`] = `Canon entry "${id}" not found in characters or locations`;
+        }
+      } catch (err) {
+        errors[`canon:${id}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(canon).length > 0) response.canon = canon;
+  }
+
+  // Scratch files
+  if (include.scratch && include.scratch.length > 0) {
+    const scratch: Record<string, string> = {};
+    await Promise.all(include.scratch.map(async (filename) => {
+      try {
+        scratch[filename] = await getScratch(projectId, filename);
+      } catch (err) {
+        errors[`scratch:${filename}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(scratch).length > 0) response.scratch = scratch;
+  }
+
+  // Parts
+  if (include.parts && include.parts.length > 0) {
+    const parts: Record<string, unknown> = {};
+    await Promise.all(include.parts.map(async (partId) => {
+      try {
+        parts[partId] = await getPart(projectId, partId);
+      } catch (err) {
+        errors[`parts:${partId}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(parts).length > 0) response.parts = parts;
+  }
+
+  // Chapter meta
+  if (include.chapter_meta && include.chapter_meta.length > 0) {
+    const chapterMeta: Record<string, unknown> = {};
+    await Promise.all(include.chapter_meta.map(async (ref) => {
+      try {
+        const { partId, chapterId } = parseChapterRef(ref);
+        chapterMeta[ref] = await getChapterMeta(projectId, partId, chapterId);
+      } catch (err) {
+        errors[`chapter_meta:${ref}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(chapterMeta).length > 0) response.chapter_meta = chapterMeta;
+  }
+
+  // Chapter prose
+  if (include.chapter_prose && include.chapter_prose.length > 0) {
+    const chapterProse: Record<string, string> = {};
+    await Promise.all(include.chapter_prose.map(async (ref) => {
+      try {
+        const { partId, chapterId } = parseChapterRef(ref);
+        chapterProse[ref] = await getChapterProse(projectId, partId, chapterId);
+      } catch (err) {
+        errors[`chapter_prose:${ref}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(chapterProse).length > 0) response.chapter_prose = chapterProse;
+  }
+
+  // Individual beats
+  if (include.beats && include.beats.length > 0) {
+    const beats: Record<string, unknown> = {};
+    await Promise.all(include.beats.map(async (ref) => {
+      try {
+        const { partId, chapterId, beatId } = parseBeatRef(ref);
+        beats[ref] = await getBeatProse(projectId, partId, chapterId, beatId);
+      } catch (err) {
+        errors[`beats:${ref}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(beats).length > 0) response.beats = beats;
+  }
+
+  // Beat variants
+  if (include.beat_variants && include.beat_variants.length > 0) {
+    const beatVariants: Record<string, unknown> = {};
+    await Promise.all(include.beat_variants.map(async (ref) => {
+      try {
+        const { partId, chapterId, beatId } = parseBeatRef(ref);
+        const result = await getBeatVariants(projectId, partId, chapterId, beatId);
+        beatVariants[ref] = result.variants;
+      } catch (err) {
+        errors[`beat_variants:${ref}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(beatVariants).length > 0) response.beat_variants = beatVariants;
+  }
+
+  // Dirty nodes
+  if (include.dirty_nodes) {
+    try {
+      response.dirty_nodes = await getDirtyNodes(projectId);
+    } catch (err) {
+      errors["dirty_nodes"] = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // Project meta
+  if (include.project_meta) {
+    try {
+      response.project_meta = await getProject(projectId);
+    } catch (err) {
+      errors["project_meta"] = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (Object.keys(errors).length > 0) {
+    response.errors = errors;
+  }
+
+  return response;
+}
+
+// ---------------------------------------------------------------------------
+// Surgical beat prose editing
+// ---------------------------------------------------------------------------
+
+export async function editBeatProse(
+  projectId: string,
+  partId: string,
+  chapterId: string,
+  beatId: string,
+  edits: { old_str: string; new_str: string }[],
+  variantIndex: number = 0
+): Promise<{
+  result: WriteResult;
+  edits_applied: number;
+  changes: { old_str: string; new_str: string; context: string }[];
+}> {
+  // Validate beat exists in meta
+  const meta = await getChapterMeta(projectId, partId, chapterId);
+  if (!meta.beats.some((b) => b.id === beatId)) {
+    throw new Error(`Beat "${beatId}" not found in ${partId}/${chapterId} meta.`);
+  }
+
+  const mdPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.md`);
+  const markdown = await readMd(mdPath);
+  const parsed = parseBeatsGrouped(markdown);
+
+  // Collect variants for this beat
+  const variantEntries = parsed.blocks
+    .map((block, idx) => ({ block, idx }))
+    .filter(({ block }) => block.id === beatId);
+
+  if (variantEntries.length === 0) {
+    throw new Error(`Beat "${beatId}" has no prose content in ${partId}/${chapterId}.`);
+  }
+
+  if (variantIndex < 0 || variantIndex >= variantEntries.length) {
+    throw new Error(
+      `Beat "${beatId}" has ${variantEntries.length} variant(s), index ${variantIndex} is out of range.`
+    );
+  }
+
+  // Empty edits → no-op
+  if (edits.length === 0) {
+    return {
+      result: { path: mdPath, description: `No edits applied to ${partId}/${chapterId}:${beatId}` },
+      edits_applied: 0,
+      changes: [],
+    };
+  }
+
+  // Work on a copy of the prose text — nothing touches disk until all edits pass
+  const target = variantEntries[variantIndex]!;
+  let text = target.block.prose;
+  const changes: { old_str: string; new_str: string; context: string }[] = [];
+
+  for (const edit of edits) {
+    const firstIdx = text.indexOf(edit.old_str);
+    if (firstIdx === -1) {
+      const preview = edit.old_str.length > 100 ? edit.old_str.slice(0, 100) + "..." : edit.old_str;
+      throw new Error(`No match for old_str in beat ${beatId}: "${preview}"`);
+    }
+
+    // Check for duplicate matches
+    const secondIdx = text.indexOf(edit.old_str, firstIdx + 1);
+    if (secondIdx !== -1) {
+      // Count total occurrences
+      let count = 2;
+      let searchFrom = secondIdx + 1;
+      while (true) {
+        const nextIdx = text.indexOf(edit.old_str, searchFrom);
+        if (nextIdx === -1) break;
+        count++;
+        searchFrom = nextIdx + 1;
+      }
+      const preview = edit.old_str.length > 100 ? edit.old_str.slice(0, 100) + "..." : edit.old_str;
+      throw new Error(
+        `old_str matches ${count} locations in beat ${beatId}. Include more context to make it unique: "${preview}"`
+      );
+    }
+
+    // Apply the replacement
+    const before = text.slice(Math.max(0, firstIdx - 50), firstIdx);
+    const afterStart = firstIdx + edit.old_str.length;
+    const after = text.slice(afterStart, afterStart + 50);
+    const context = `...${before}${edit.new_str}${after}...`;
+
+    text = text.slice(0, firstIdx) + edit.new_str + text.slice(firstIdx + edit.old_str.length);
+    changes.push({ old_str: edit.old_str, new_str: edit.new_str, context });
+  }
+
+  // All edits passed — update the block and write to disk
+  parsed.blocks[target.idx]! = { ...target.block, prose: text };
+  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble);
+  await writeMd(mdPath, updated);
+
+  return {
+    result: { path: mdPath, description: `Applied ${edits.length} edit(s) to ${partId}/${chapterId}:${beatId}` },
+    edits_applied: edits.length,
+    changes,
   };
 }
 
