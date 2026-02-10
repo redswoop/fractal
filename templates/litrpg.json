@@ -1,0 +1,34 @@
+{
+  "id": "litrpg",
+  "name": "LitRPG / GameLit",
+  "description": "For progression fantasy, LitRPG, and GameLit — stories where characters level up, acquire items, and interact with game-like systems.",
+  "canon_types": [
+    {
+      "id": "characters",
+      "label": "Characters",
+      "description": "People in the story — include stats, class, level, and abilities alongside personality"
+    },
+    {
+      "id": "locations",
+      "label": "Locations",
+      "description": "Places where scenes happen — dungeons, towns, zones, instances"
+    },
+    {
+      "id": "systems",
+      "label": "Systems",
+      "description": "Game mechanics — classes, leveling rules, stat calculations, skill trees, crafting"
+    },
+    {
+      "id": "factions",
+      "label": "Factions",
+      "description": "Guilds, parties, kingdoms, monster factions — any group with collective goals"
+    },
+    {
+      "id": "items",
+      "label": "Items",
+      "description": "Weapons, armor, consumables, artifacts — anything with stats or narrative significance"
+    }
+  ],
+  "themes": [],
+  "guide": "# LitRPG Canon Guide\n\n## Characters\nOne file per named character. Include:\n- Personality and voice (this is still a story, not a stat sheet)\n- Class, level, key stats\n- Notable abilities and skills\n- Inventory highlights (link to items canon for details)\n- Arc and growth trajectory\n\n## Locations\nOne file per significant area. Include:\n- Physical description and atmosphere\n- Level range and difficulty\n- Notable monsters or NPCs\n- Loot tables or resources (if relevant)\n\n## Systems\nOne file per game mechanic. Include:\n- How it works — rules, formulas if needed\n- Edge cases and limitations\n- How characters interact with it\n- Keep it consistent — readers will check your math\n\n## Factions\nOne file per guild, party, or organization. Include:\n- Members, leadership, ranking system\n- Territory and resources\n- Goals and rivalries\n\n## Items\nOne file per significant item or item category. Include:\n- Stats and effects\n- Rarity and how it was obtained\n- Who currently has it\n- Narrative significance beyond stats\n"
+}

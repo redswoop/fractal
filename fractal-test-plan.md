@@ -2,7 +2,7 @@
 
 > **Purpose:** Systematic verification of every Fractal MCP tool. Creates a throwaway test project with a simple story, exercises all CRUD operations, verifies round-trip integrity, tests error handling, and finishes with inference-based quality checks.
 >
-> **IMPORTANT:** This test suite must run against a **separate projects root** — not the production root containing `velvet-bond` or any real work. Configure the Fractal server's `PROJECTS_ROOT` (or equivalent) to point at a temporary directory before running. If that's not possible, the test project `_fractal-test` should be treated as disposable and deleted after the run.
+> **IMPORTANT:** This test suite must run against a **separate projects root** — not the production root containing real projects or any real work. Configure the Fractal server's `PROJECTS_ROOT` (or equivalent) to point at a temporary directory before running. If that's not possible, the test project `_fractal-test` should be treated as disposable and deleted after the run.
 
 ---
 

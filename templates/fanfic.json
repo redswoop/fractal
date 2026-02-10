@@ -1,0 +1,29 @@
+{
+  "id": "fanfic",
+  "name": "Fanfiction",
+  "description": "For stories set in existing universes — tracks what you're keeping from canon, what you're changing, and what's original.",
+  "canon_types": [
+    {
+      "id": "characters",
+      "label": "Characters",
+      "description": "All characters — both from the source material and original characters (OCs)"
+    },
+    {
+      "id": "locations",
+      "label": "Locations",
+      "description": "Places where scenes happen — from the source material or invented"
+    },
+    {
+      "id": "canon-deviations",
+      "label": "Canon Deviations",
+      "description": "Explicit changes from the source material — what's different and why"
+    },
+    {
+      "id": "original-additions",
+      "label": "Original Additions",
+      "description": "New characters, locations, concepts, or rules not in the source material"
+    }
+  ],
+  "themes": [],
+  "guide": "# Fanfiction Canon Guide\n\n## Characters\nOne file per character. For source material characters, note:\n- What you're keeping from the original\n- Any reinterpretation of personality or background\n- Where in the source timeline you're picking them up\n\nFor OCs, write a full character sheet — personality, appearance, role, constraints.\n\n## Locations\nOne file per significant location. Note whether it's from the source material or original.\n\n## Canon Deviations\nOne file per significant departure from the source material. Include:\n- What the original version is\n- What your version changes\n- Why (AU premise, fix-it, divergence point)\n- Downstream effects — what else changes because of this\n\nThis is the most important canon type for fanfic. Being explicit about deviations prevents accidental contradictions — you'll know whether you meant to change something or just forgot the original.\n\n## Original Additions\nOne file per new element you've added to the universe. Include:\n- What it is and how it fits\n- Why it doesn't contradict the source material (or how it does, intentionally)\n- Which characters interact with it\n"
+}

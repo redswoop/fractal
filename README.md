@@ -17,13 +17,14 @@ You talk to Claude in natural language. Claude talks to Fractal through MCP tool
 Fractal manages **projects** — each one a novel, novella, or other long-form work. Each project contains:
 
 - **Parts** and **chapters** with beat-level structure
-- **Canon** — character sheets, locations, world rules (plain markdown)
+- **Canon** — character sheets, locations, and any genre-specific types (factions, items, systems, relationships — whatever your story needs). Plain markdown.
+- **Templates** — genre presets that configure which canon types a project starts with (fiction, worldbuilding, LitRPG, fanfic), or start with the default and add types as you go
 - **Scratch** — loose scenes, dialogue riffs, ideas without a home yet
 - **Dirty tracking** — when canon changes, downstream beats get flagged for review
 - **Inline annotations** — notes, queries, continuity flags embedded in prose
 - **Git versioning** — every write auto-commits with a meaningful message
 
-There are 37 tools covering reads, writes, search, structure manipulation, and session management.
+There are 38 tools covering reads, writes, search, structure manipulation, and session management.
 
 ## Examples
 
@@ -234,6 +235,23 @@ That's your story. The JSON files are structural metadata — useful but ignorab
 
 **Your story is never locked in.**
 
+## Templates
+
+Different genres need different canon structures. A LitRPG needs items and systems. A mystery needs evidence and suspect profiles. A romance might need relationship trackers.
+
+Templates configure which canon types a project starts with:
+
+| Template | Canon types | Good for |
+|----------|------------|----------|
+| `fiction-default` | characters, locations | Literary fiction, thrillers, memoir, most narratives |
+| `worldbuilding` | characters, locations, factions, lore, systems | Epic fantasy, sci-fi, alternate history |
+| `litrpg` | characters, locations, systems, factions, items | Progression fantasy, GameLit |
+| `fanfic` | characters, locations, canon-deviations, original-additions | Stories set in existing universes |
+
+Templates are scaffolding, not cages. You can always create new canon types on the fly — just call `update_canon` with any type name and the directory is created automatically. A romance writer might start with `fiction-default` and add `relationships` and `sensory-palette` types as the story demands them.
+
+Each template includes a GUIDE.md that explains when to use each canon type, readable via `get_context`.
+
 ## Quick start
 
 ```bash
@@ -282,9 +300,10 @@ Point your MCP config at the running server's `/mcp` endpoint.
 
 ```
 src/
-  server.ts   — MCP server, all 37 tool registrations (Fastify + Streamable HTTP)
+  server.ts   — MCP server, all 38 tool registrations (Fastify + Streamable HTTP)
   store.ts    — Filesystem operations (read/write projects, chapters, canon, scratch)
   git.ts      — Auto-commit and session-commit helpers
+templates/    — Genre presets (fiction-default, worldbuilding, litrpg, fanfic)
 ```
 
 ## Tools
@@ -295,7 +314,8 @@ src/
 |------|-------------|
 | `hello` | Proof-of-life greeting |
 | `list_projects` | List all projects |
-| `get_project` | Project metadata — title, logline, status, themes, parts list |
+| `list_templates` | Available project templates (fiction, worldbuilding, LitRPG, fanfic) |
+| `get_project` | Project metadata — title, logline, status, themes, parts list, active canon types |
 | `get_part` | Part metadata — title, summary, arc, chapters |
 | `get_chapter_meta` | Chapter metadata — beats index with statuses and summaries |
 | `get_chapter_prose` | Full chapter markdown with beat markers |
@@ -314,13 +334,13 @@ src/
 
 | Tool | Description |
 |------|-------------|
-| `create_project` | Bootstrap a new project with starter files + git init |
+| `create_project` | Bootstrap a new project — optionally from a genre template |
 | `create_part` | Create a part directory |
 | `create_chapter` | Create a chapter (prose .md + .meta.json) |
 | `update_project` | Patch project metadata |
 | `update_part` | Patch part metadata |
 | `update_chapter_meta` | Patch chapter metadata / beats |
-| `update_canon` | Create or rewrite a canon entry |
+| `update_canon` | Create or rewrite a canon entry (any type — characters, factions, items, etc.) |
 | `write_beat_prose` | Insert or replace prose for a beat (supports append for variants) |
 | `edit_beat_prose` | Surgical find/replace within a beat |
 | `add_beat` | Add a beat to a chapter's structure |
@@ -341,11 +361,11 @@ src/
 Chapters are single markdown files with beat markers as HTML comments:
 
 ```markdown
-<!-- beat:b01 | Emmy arrives at the gallery -->
-Emmy hadn't expected the door to be unlocked...
+<!-- beat:b01 | Unit 7 walks down Main Street -->
+Unit 7 walked down Main Street at 6:47 AM...
 
-<!-- beat:b02 | She meets the curator -->
-The woman behind the desk didn't look up...
+<!-- beat:b02 | She enters the bakery -->
+The woman behind the counter looked up...
 
 <!-- /chapter -->
 ```

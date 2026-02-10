@@ -15,6 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import type { FastifyRequest, FastifyReply } from "fastify";
@@ -38,7 +39,7 @@ const PORT = parseInt(process.env["PORT"] ?? "3001", 10);
 // ---------------------------------------------------------------------------
 
 const projectParam = z.string().describe(
-  "Project identifier (directory name under projects/), e.g. 'velvet-bond'"
+  "Project identifier (directory name under projects/), e.g. 'rust-and-flour'"
 );
 
 // ---------------------------------------------------------------------------
@@ -129,21 +130,51 @@ function createMcpServer(): McpServer {
 
   server.registerTool("create_project", {
     title: "Create Project",
-    description: "Bootstrap a new empty project with all required directories and starter files, plus git init.",
+    description:
+      "Bootstrap a new empty project with all required directories and starter files, plus git init. " +
+      "Optionally pass a template to configure canon types and project guide. " +
+      "Use list_templates to see available templates. Without a template, defaults to characters + locations.",
     inputSchema: {
       project: projectParam,
       title: z.string().describe("Display title for the project"),
+      template: z.string().optional().describe(
+        "Template ID for project setup, e.g. 'fiction-default', 'worldbuilding', 'litrpg', 'fanfic'. " +
+        "Use list_templates to see available options. If omitted, uses default (characters + locations)."
+      ),
     },
-  }, async ({ project, title }) => {
-    logToolCall("create_project", { project, title });
+  }, async ({ project, title, template: templateId }) => {
+    logToolCall("create_project", { project, title, template: templateId });
     try {
-      const root = await store.ensureProjectStructure(project, title);
+      let tmpl: store.ProjectTemplate | undefined;
+      if (templateId) {
+        tmpl = await store.loadTemplate(templateId);
+      }
+      const root = await store.ensureProjectStructure(project, title, tmpl);
       await ensureGitRepo(root);
-      return jsonResult({ project, root, description: `Created project "${title}" at ${root}` });
+      return jsonResult({
+        project,
+        root,
+        template: templateId ?? "default",
+        description: `Created project "${title}" at ${root}`,
+      });
     } catch (err) {
       logToolError("create_project", err);
       throw err;
     }
+  });
+
+  server.registerTool("list_templates", {
+    title: "List Templates",
+    description:
+      "List available project templates. Templates define which canon types " +
+      "(characters, locations, factions, systems, etc.) a project starts with.",
+    inputSchema: {},
+  }, async () => {
+    const templates = await store.listTemplates();
+    if (templates.length === 0) {
+      return textResult("No templates found. Projects will use the default setup (characters + locations).");
+    }
+    return jsonResult(templates);
   });
 
   server.registerTool("create_part", {
@@ -207,13 +238,20 @@ function createMcpServer(): McpServer {
 
   server.registerTool("get_project", {
     title: "Get Project",
-    description: "Returns the top-level project.json — title, logline, status, themes, parts list.",
+    description: "Returns the top-level project.json — title, logline, status, themes, parts list, canon types.",
     inputSchema: {
       project: projectParam,
     },
   }, async ({ project }) => {
     const data = await store.getProject(project);
-    return jsonResult(data);
+    const canonTypesActive = await store.listCanonTypes(project);
+    const root = store.projectRoot(project);
+    const hasGuide = existsSync(join(root, "GUIDE.md"));
+    return jsonResult({
+      ...data,
+      canon_types_active: canonTypesActive,
+      has_guide: hasGuide,
+    });
   });
 
   server.registerTool("get_part", {
@@ -291,8 +329,8 @@ function createMcpServer(): McpServer {
     description: "Returns a canon file (character, location, etc.) and its metadata sidecar.",
     inputSchema: {
       project: projectParam,
-      type: z.string().describe("Canon type: 'characters', 'locations'"),
-      id: z.string().describe("Canon entry id, e.g. 'emmy', 'the-gallery'"),
+      type: z.string().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions'. Use get_project to see active types."),
+      id: z.string().describe("Canon entry id, e.g. 'unit-7', 'the-bakery'"),
     },
   }, async ({ project, type, id }) => {
     const data = await store.getCanon(project, type, id);
@@ -304,7 +342,7 @@ function createMcpServer(): McpServer {
     description: "Lists all canon entries of a given type.",
     inputSchema: {
       project: projectParam,
-      type: z.string().describe("Canon type: 'characters', 'locations'"),
+      type: z.string().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions'. Use get_project to see active types."),
     },
   }, async ({ project, type }) => {
     const entries = await store.listCanon(project, type);
@@ -327,7 +365,7 @@ function createMcpServer(): McpServer {
     description: "Returns the content of a scratch file.",
     inputSchema: {
       project: projectParam,
-      filename: z.string().describe("Scratch filename, e.g. 'emmy-rooftop-scene.md'"),
+      filename: z.string().describe("Scratch filename, e.g. 'unit7-dream-sequence.md'"),
     },
   }, async ({ project, filename }) => {
     const data = await store.getScratch(project, filename);
@@ -378,7 +416,7 @@ function createMcpServer(): McpServer {
     inputSchema: {
       project: projectParam,
       include: z.object({
-        canon: z.array(z.string()).optional().describe("Canon IDs to load, e.g. ['emmy', 'the-gallery']. Type (character/location) is inferred."),
+        canon: z.array(z.string()).optional().describe("Canon IDs to load, e.g. ['unit-7', 'the-bakery']. Type is inferred by scanning canon directories."),
         scratch: z.array(z.string()).optional().describe("Scratch filenames, e.g. ['voice-codex.md']"),
         parts: z.array(z.string()).optional().describe("Part IDs, e.g. ['part-01']"),
         chapter_meta: z.array(z.string()).optional().describe("Chapter refs, e.g. ['part-01/chapter-03']"),
@@ -387,6 +425,7 @@ function createMcpServer(): McpServer {
         beat_variants: z.array(z.string()).optional().describe("Beat refs for variant listing, e.g. ['part-01/chapter-03:b03']"),
         dirty_nodes: z.boolean().optional().describe("Include all dirty/conflict nodes"),
         project_meta: z.boolean().optional().describe("Include top-level project metadata"),
+        guide: z.boolean().optional().describe("Include GUIDE.md content from project root"),
       }).describe("What to include. Every key is optional. Request exactly what you need."),
     },
   }, async ({ project, include }) => {
@@ -410,6 +449,11 @@ function createMcpServer(): McpServer {
         status: z.string().optional().describe("e.g. 'planning', 'in-progress', 'complete'"),
         themes: z.array(z.string()).optional().describe("Thematic threads being tracked"),
         parts: z.array(z.string()).optional().describe("Ordered part IDs, e.g. ['part-01', 'part-02']"),
+        canon_types: z.array(z.object({
+          id: z.string().describe("Canon type directory name, e.g. 'factions'"),
+          label: z.string().describe("Display label, e.g. 'Factions'"),
+          description: z.string().describe("What this canon type contains"),
+        })).optional().describe("Canon type definitions. Updates metadata only — use update_canon with the new type to create entries."),
       }).describe("Fields to update in project.json. Only include fields you want to change."),
     },
   }, async ({ project, patch }) => {
@@ -578,11 +622,11 @@ function createMcpServer(): McpServer {
       chapter_id: z.string().describe("Chapter identifier"),
       beat: z.object({
         id: z.string().describe("Beat identifier, e.g. 'b01'"),
-        label: z.string().describe("Short label, e.g. 'Emmy arrives at the gallery'"),
+        label: z.string().describe("Short label, e.g. 'Unit 7 opens the bakery'"),
         summary: z.string().describe("What happens in this beat"),
         status: z.string().optional().describe("Default: 'planned'. Values: 'planned', 'written', 'dirty', 'conflict'"),
         dirty_reason: z.string().nullable().optional().describe("Reason if dirty. Usually null for new beats."),
-        characters: z.array(z.string()).optional().describe("Character IDs, e.g. ['emmy', 'roth']"),
+        characters: z.array(z.string()).optional().describe("Character IDs, e.g. ['unit-7', 'marguerite']"),
         depends_on: z.array(z.string()).optional().describe("Beat refs this depends on, e.g. ['chapter-01:b02']"),
         depended_by: z.array(z.string()).optional().describe("Beat refs that depend on this"),
       }).describe("Beat definition. Required: id, label, summary. Others have sensible defaults."),
@@ -708,7 +752,7 @@ function createMcpServer(): McpServer {
     inputSchema: {
       project: projectParam,
       node_ref: z.string().describe("Node reference, e.g. 'part-01', 'part-01/chapter-02', 'part-01/chapter-02:b03'"),
-      reason: z.string().describe("Why this node is dirty, e.g. 'emmy.md canon updated: tattoo backstory changed'"),
+      reason: z.string().describe("Why this node is dirty, e.g. 'marguerite.md canon updated: backstory changed'"),
     },
   }, async ({ project, node_ref, reason }) => {
     logToolCall("mark_dirty", { project, node_ref, reason });
@@ -754,7 +798,7 @@ function createMcpServer(): McpServer {
     description: "Create or rewrite a canon file (character, location, etc.).",
     inputSchema: {
       project: projectParam,
-      type: z.string().describe("Canon type: 'characters', 'locations'"),
+      type: z.string().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions'. Use get_project to see active types."),
       id: z.string().describe("Canon entry id"),
       content: z.string().describe("Full markdown content for the canon file"),
       meta: z.object({
@@ -787,7 +831,7 @@ function createMcpServer(): McpServer {
     description: "Add a new file to the scratch folder (loose scenes, ideas, dialogue riffs).",
     inputSchema: {
       project: projectParam,
-      filename: z.string().describe("Filename for the scratch file, e.g. 'emmy-bar-scene.md'"),
+      filename: z.string().describe("Filename for the scratch file, e.g. 'unit7-dream-sequence.md'"),
       content: z.string().describe("Content of the scratch file"),
       note: z.string().describe("Note about what this is and where it might go"),
       characters: z.array(z.string()).optional().describe("Characters involved"),

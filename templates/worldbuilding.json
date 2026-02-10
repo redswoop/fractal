@@ -1,0 +1,34 @@
+{
+  "id": "worldbuilding",
+  "name": "Worldbuilding",
+  "description": "For stories with invented worlds, complex politics, or deep lore — epic fantasy, sci-fi, alternate history.",
+  "canon_types": [
+    {
+      "id": "characters",
+      "label": "Characters",
+      "description": "People in the story — protagonists, antagonists, supporting cast"
+    },
+    {
+      "id": "locations",
+      "label": "Locations",
+      "description": "Places where scenes happen — cities, dungeons, planets, rooms"
+    },
+    {
+      "id": "factions",
+      "label": "Factions",
+      "description": "Groups, organizations, nations, guilds — any collective with goals and structure"
+    },
+    {
+      "id": "lore",
+      "label": "Lore",
+      "description": "History, mythology, cosmology, legends — the backstory of the world itself"
+    },
+    {
+      "id": "systems",
+      "label": "Systems",
+      "description": "Rules that govern the world — magic systems, technology, economies, laws of nature"
+    }
+  ],
+  "themes": [],
+  "guide": "# Worldbuilding Canon Guide\n\n## Characters\nOne file per named character. Include core facts, personality, voice, arc, and constraints.\n\n## Locations\nOne file per significant place. Include geography, atmosphere, who controls it, and what happens there.\n\n## Factions\nOne file per group or organization. Include:\n- Name, structure, and leadership\n- Goals and methods\n- Relationship to other factions (allies, enemies, neutral)\n- How a member would describe themselves vs. how outsiders see them\n\n## Lore\nOne file per historical event, myth, or cosmological concept. Include:\n- What happened (or what people believe happened)\n- Who was involved\n- How it affects the present\n- What characters know vs. what's actually true\n\n## Systems\nOne file per system (magic, technology, economy, etc.). Include:\n- How it works — rules, costs, limitations\n- Who can access it\n- What it can and cannot do (constraints prevent power creep)\n- How it looks/feels when used\n"
+}

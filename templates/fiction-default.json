@@ -1,0 +1,19 @@
+{
+  "id": "fiction-default",
+  "name": "Fiction (Default)",
+  "description": "Standard fiction setup — characters and locations. Works for literary fiction, thrillers, romance, memoir-as-fiction, and most narratives.",
+  "canon_types": [
+    {
+      "id": "characters",
+      "label": "Characters",
+      "description": "People in the story — protagonists, antagonists, supporting cast"
+    },
+    {
+      "id": "locations",
+      "label": "Locations",
+      "description": "Places where scenes happen — cities, rooms, landscapes"
+    }
+  ],
+  "themes": [],
+  "guide": "# Fiction Canon Guide\n\n## Characters\nOne file per named character. Include:\n- Core facts (age, appearance, role)\n- Personality and voice notes\n- Arc trajectory\n- Constraints (things this character would never do)\n\n## Locations\nOne file per significant location. Include:\n- Physical description and atmosphere\n- What typically happens here\n- Sensory details (sounds, smells, light)\n"
+}

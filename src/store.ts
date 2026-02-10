@@ -313,6 +313,60 @@ function appendBeatBlock(
 }
 
 // ---------------------------------------------------------------------------
+// Canon type definitions & templates
+// ---------------------------------------------------------------------------
+
+export interface CanonTypeDefinition {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface ProjectTemplate {
+  id: string;
+  name: string;
+  description: string;
+  canon_types: CanonTypeDefinition[];
+  themes: string[];
+  guide: string | null;
+}
+
+const TEMPLATES_ROOT = resolve(
+  process.env["FRINGE_TEMPLATES_ROOT"] ?? join(import.meta.dirname, "..", "templates")
+);
+
+const DEFAULT_CANON_TYPES: CanonTypeDefinition[] = [
+  { id: "characters", label: "Characters", description: "People in the story" },
+  { id: "locations", label: "Locations", description: "Places in the story" },
+];
+
+export async function listTemplates(): Promise<{ id: string; name: string; description: string }[]> {
+  if (!existsSync(TEMPLATES_ROOT)) return [];
+  const entries = await readdir(TEMPLATES_ROOT);
+  const templates: { id: string; name: string; description: string }[] = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) continue;
+    try {
+      const data = await readJson<ProjectTemplate>(join(TEMPLATES_ROOT, entry));
+      templates.push({ id: data.id, name: data.name, description: data.description });
+    } catch {
+      continue;
+    }
+  }
+  return templates;
+}
+
+export async function loadTemplate(templateId: string): Promise<ProjectTemplate> {
+  const templatePath = join(TEMPLATES_ROOT, `${templateId}.json`);
+  if (!existsSync(templatePath)) {
+    throw new Error(
+      `Template "${templateId}" not found. Use list_templates to see available templates.`
+    );
+  }
+  return readJson<ProjectTemplate>(templatePath);
+}
+
+// ---------------------------------------------------------------------------
 // Project management
 // ---------------------------------------------------------------------------
 
@@ -323,6 +377,7 @@ export interface ProjectData {
   status: string;
   themes: string[];
   parts: string[];
+  canon_types?: CanonTypeDefinition[];
 }
 
 export async function listProjects(): Promise<{ id: string; title: string; status: string }[]> {
@@ -347,7 +402,8 @@ export async function listProjects(): Promise<{ id: string; title: string; statu
 
 export async function ensureProjectStructure(
   projectId: string,
-  title: string
+  title: string,
+  template?: ProjectTemplate
 ): Promise<string> {
   if (!/^_?[a-z0-9][a-z0-9-]*$/.test(projectId)) {
     throw new Error(`Invalid project ID: "${projectId}". Use lowercase alphanumeric, hyphens, and optional _ prefix for test projects.`);
@@ -356,25 +412,39 @@ export async function ensureProjectStructure(
 
   await mkdir(root, { recursive: true });
   await mkdir(join(root, "parts"), { recursive: true });
-  await mkdir(join(root, "canon", "characters"), { recursive: true });
-  await mkdir(join(root, "canon", "locations"), { recursive: true });
   await mkdir(join(root, "scratch"), { recursive: true });
+
+  // Create canon type directories from template, or default to characters + locations
+  const canonTypes = template?.canon_types ?? DEFAULT_CANON_TYPES;
+  for (const ct of canonTypes) {
+    await mkdir(join(root, "canon", ct.id), { recursive: true });
+  }
 
   const projectJsonPath = join(root, "project.json");
   if (!existsSync(projectJsonPath)) {
-    await writeJson(projectJsonPath, {
+    const projectData: ProjectData = {
       title,
       subtitle: null,
       logline: "",
       status: "planning",
-      themes: [],
+      themes: template?.themes ?? [],
       parts: [],
-    });
+      canon_types: canonTypes,
+    };
+    await writeJson(projectJsonPath, projectData);
   }
 
   const scratchJsonPath = join(root, "scratch", "scratch.json");
   if (!existsSync(scratchJsonPath)) {
     await writeJson(scratchJsonPath, { items: [] });
+  }
+
+  // Write GUIDE.md if template provides one
+  if (template?.guide) {
+    const guidePath = join(root, "GUIDE.md");
+    if (!existsSync(guidePath)) {
+      await writeMd(guidePath, template.guide);
+    }
   }
 
   return root;
@@ -559,12 +629,27 @@ export async function listCanon(projectId: string, type: string): Promise<string
     .map((f) => f.replace(/\.md$/, ""));
 }
 
+/**
+ * Discover all canon types by scanning subdirectories of canon/.
+ * This is the source of truth — works regardless of project.json config.
+ */
+export async function listCanonTypes(projectId: string): Promise<string[]> {
+  const canonDir = join(projectRoot(projectId), "canon");
+  if (!existsSync(canonDir)) return [];
+  const entries = await readdir(canonDir, { withFileTypes: true });
+  return entries
+    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+    .map((e) => e.name)
+    .sort();
+}
+
 async function resolveCanon(
   projectId: string,
   id: string
 ): Promise<{ content: string; meta: unknown; type: string } | null> {
   const root = projectRoot(projectId);
-  for (const type of ["characters", "locations"]) {
+  const types = await listCanonTypes(projectId);
+  for (const type of types) {
     const mdPath = join(root, "canon", type, `${id}.md`);
     if (existsSync(mdPath)) {
       const content = await readMd(mdPath);
@@ -1447,6 +1532,7 @@ export interface ContextInclude {
   beat_variants?: string[];
   dirty_nodes?: boolean;
   project_meta?: boolean;
+  guide?: boolean;
 }
 
 export async function getContext(
@@ -1465,7 +1551,7 @@ export async function getContext(
         if (result) {
           canon[id] = result;
         } else {
-          errors[`canon:${id}`] = `Canon entry "${id}" not found in characters or locations`;
+          errors[`canon:${id}`] = `Canon entry "${id}" not found in any canon type`;
         }
       } catch (err) {
         errors[`canon:${id}`] = err instanceof Error ? err.message : String(err);
@@ -1572,6 +1658,20 @@ export async function getContext(
       response.project_meta = await getProject(projectId);
     } catch (err) {
       errors["project_meta"] = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // Guide
+  if (include.guide) {
+    try {
+      const guidePath = join(projectRoot(projectId), "GUIDE.md");
+      if (existsSync(guidePath)) {
+        response.guide = await readMd(guidePath);
+      } else {
+        response.guide = null;
+      }
+    } catch (err) {
+      errors["guide"] = err instanceof Error ? err.message : String(err);
     }
   }
 
