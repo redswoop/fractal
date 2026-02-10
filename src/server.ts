@@ -21,8 +21,9 @@ import cors from "@fastify/cors";
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { InMemoryEventStore } from "@modelcontextprotocol/sdk/examples/shared/inMemoryEventStore.js";
+import type { EventStore } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 
 import * as store from "./store.js";
@@ -33,6 +34,48 @@ import { ensureGitRepo, autoCommit, sessionCommit } from "./git.js";
 // ---------------------------------------------------------------------------
 
 const PORT = parseInt(process.env["PORT"] ?? "3001", 10);
+const SESSION_TTL_MS = parseInt(process.env["SESSION_TTL_MS"] ?? String(30 * 60 * 1000), 10);
+const REAPER_INTERVAL_MS = parseInt(process.env["REAPER_INTERVAL_MS"] ?? "60000", 10);
+
+// ---------------------------------------------------------------------------
+// Bounded event store (replaces SDK's InMemoryEventStore)
+// ---------------------------------------------------------------------------
+
+class BoundedEventStore implements EventStore {
+  private events = new Map<string, { streamId: string; message: JSONRPCMessage }>();
+  private readonly maxEvents: number;
+
+  constructor(maxEvents = 200) {
+    this.maxEvents = maxEvents;
+  }
+
+  async storeEvent(streamId: string, message: JSONRPCMessage): Promise<string> {
+    const eventId = `${streamId}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    this.events.set(eventId, { streamId, message });
+    if (this.events.size > this.maxEvents) {
+      const oldest = this.events.keys().next().value;
+      if (oldest) this.events.delete(oldest);
+    }
+    return eventId;
+  }
+
+  async replayEventsAfter(
+    lastEventId: string,
+    { send }: { send: (eventId: string, message: JSONRPCMessage) => Promise<void> }
+  ): Promise<string> {
+    if (!lastEventId || !this.events.has(lastEventId)) return "";
+    const streamId = lastEventId.split("_")[0] ?? "";
+    if (!streamId) return "";
+    let found = false;
+    const sorted = [...this.events.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [eid, { streamId: sid, message }] of sorted) {
+      if (sid !== streamId) continue;
+      if (eid === lastEventId) { found = true; continue; }
+      if (found) await send(eid, message);
+    }
+    return streamId;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Shared schema
@@ -1079,7 +1122,13 @@ function createMcpServer(): McpServer {
 // Session management
 // ---------------------------------------------------------------------------
 
-const transports: Record<string, StreamableHTTPServerTransport> = {};
+interface SessionInfo {
+  transport: StreamableHTTPServerTransport;
+  lastActivity: number;
+  createdAt: number;
+}
+
+const sessions = new Map<string, SessionInfo>();
 
 // ---------------------------------------------------------------------------
 // Fastify app
@@ -1120,7 +1169,22 @@ app.addHook("onRequest", (request, reply, done) => {
 // --- Health check ---
 app.get("/health", async () => {
   const projects = await store.listProjects();
-  return { status: "ok", projects_root: store.getProjectsRoot(), test_projects_root: store.getTestProjectsRoot(), projects };
+  const mem = process.memoryUsage();
+  return {
+    status: "ok",
+    sessions: {
+      active: sessions.size,
+      ttl_ms: SESSION_TTL_MS,
+    },
+    memory: {
+      rss_mb: Math.round(mem.rss / 1024 / 1024),
+      heap_used_mb: Math.round(mem.heapUsed / 1024 / 1024),
+      heap_total_mb: Math.round(mem.heapTotal / 1024 / 1024),
+    },
+    projects_root: store.getProjectsRoot(),
+    test_projects_root: store.getTestProjectsRoot(),
+    projects,
+  };
 });
 
 // --- Help endpoint ---
@@ -1196,29 +1260,31 @@ app.post("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
   const sessionId = request.headers["mcp-session-id"] as string | undefined;
 
   try {
-    if (sessionId && transports[sessionId]) {
-      const transport = transports[sessionId]!;
-      await transport.handleRequest(request.raw, reply.raw, request.body);
+    if (sessionId && sessions.has(sessionId)) {
+      const info = sessions.get(sessionId)!;
+      info.lastActivity = Date.now();
+      await info.transport.handleRequest(request.raw, reply.raw, request.body);
       return reply.hijack();
     }
 
     if (!sessionId && isInitializeRequest(request.body)) {
-      const eventStore = new InMemoryEventStore();
+      const eventStore = new BoundedEventStore();
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         eventStore,
         enableJsonResponse: true,
         onsessioninitialized: (sid: string) => {
-          transports[sid] = transport;
-          request.log.info(`Session initialized: ${sid}`);
+          const now = Date.now();
+          sessions.set(sid, { transport, lastActivity: now, createdAt: now });
+          request.log.info(`Session initialized: ${sid} (active: ${sessions.size})`);
         },
       });
 
       transport.onclose = () => {
         const sid = transport.sessionId;
-        if (sid && transports[sid]) {
-          request.log.info(`Session closed: ${sid}`);
-          delete transports[sid];
+        if (sid && sessions.has(sid)) {
+          sessions.delete(sid);
+          console.log(`Session closed: ${sid} (active: ${sessions.size})`);
         }
       };
 
@@ -1252,13 +1318,14 @@ app.post("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
 app.get("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
   const sessionId = request.headers["mcp-session-id"] as string | undefined;
 
-  if (!sessionId || !transports[sessionId]) {
+  if (!sessionId || !sessions.has(sessionId)) {
     reply.code(400).send("Invalid or missing session ID");
     return;
   }
 
-  const transport = transports[sessionId]!;
-  await transport.handleRequest(request.raw, reply.raw);
+  const info = sessions.get(sessionId)!;
+  info.lastActivity = Date.now();
+  await info.transport.handleRequest(request.raw, reply.raw);
   return reply.hijack();
 });
 
@@ -1269,14 +1336,14 @@ app.get("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
 app.delete("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
   const sessionId = request.headers["mcp-session-id"] as string | undefined;
 
-  if (!sessionId || !transports[sessionId]) {
+  if (!sessionId || !sessions.has(sessionId)) {
     reply.code(400).send("Invalid or missing session ID");
     return;
   }
 
   request.log.info(`Session termination requested: ${sessionId}`);
-  const transport = transports[sessionId]!;
-  await transport.handleRequest(request.raw, reply.raw);
+  const info = sessions.get(sessionId)!;
+  await info.transport.handleRequest(request.raw, reply.raw);
   return reply.hijack();
 });
 
@@ -1300,6 +1367,19 @@ async function main() {
       await ensureGitRepo(store.projectRoot(p.id));
     }
 
+    // Session idle reaper
+    reaperInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [sid, info] of sessions) {
+        if (now - info.lastActivity > SESSION_TTL_MS) {
+          console.log(`Reaping idle session ${sid} (idle ${Math.round((now - info.lastActivity) / 1000)}s)`);
+          info.transport.close().catch(err =>
+            console.error(`Error closing idle session ${sid}:`, err)
+          );
+        }
+      }
+    }, REAPER_INTERVAL_MS);
+
     await app.listen({ port: PORT, host: "0.0.0.0" });
     console.log(`\nFractal MCP server listening on http://0.0.0.0:${PORT}`);
     console.log(`  Health check: http://localhost:${PORT}/health`);
@@ -1307,6 +1387,7 @@ async function main() {
     console.log(`  MCP endpoint: http://localhost:${PORT}/mcp`);
     console.log(`  Projects:     ${projectsRoot}`);
     console.log(`  Test:         ${testRoot}`);
+    console.log(`  Session TTL:  ${SESSION_TTL_MS / 1000}s (reaper every ${REAPER_INTERVAL_MS / 1000}s)`);
     console.log(`  Loaded:       ${projects.map((p) => p.id).join(", ") || "(none)"}\n`);
   } catch (err) {
     app.log.error(err);
@@ -1314,16 +1395,19 @@ async function main() {
   }
 }
 
+let reaperInterval: ReturnType<typeof setInterval>;
+
 process.on("SIGINT", async () => {
   console.log("\nShutting down...");
-  for (const sid of Object.keys(transports)) {
+  clearInterval(reaperInterval);
+  for (const [sid, info] of sessions) {
     try {
-      await transports[sid]!.close();
-      delete transports[sid];
+      await info.transport.close();
     } catch (err) {
       console.error(`Error closing session ${sid}:`, err);
     }
   }
+  sessions.clear();
   process.exit(0);
 });
 
