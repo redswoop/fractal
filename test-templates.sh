@@ -1,0 +1,434 @@
+#!/usr/bin/env bash
+# Template-driven canon types feature test suite
+# Runs 13 tests against the Fractal MCP server on localhost:3001
+
+set -euo pipefail
+
+BASE_URL="http://localhost:3001/mcp"
+TEST_DIR="/workspace/fractal/test-projects/_fractal-test"
+PASS_COUNT=0
+FAIL_COUNT=0
+CALL_ID=0
+SESSION_ID=""
+
+# ── MCP session initialization ──────────────────────────────
+init_session() {
+  local resp
+  resp=$(curl -si --max-time 10 -X POST "$BASE_URL" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test-templates","version":"1.0"}},"id":0}')
+  SESSION_ID=$(echo "$resp" | grep -i "mcp-session-id" | head -1 | tr -d '\r' | awk '{print $2}')
+  if [ -z "$SESSION_ID" ]; then
+    echo "FATAL: Failed to initialize MCP session"
+    echo "$resp"
+    exit 1
+  fi
+  # Send initialized notification
+  curl -s --max-time 5 -X POST "$BASE_URL" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "mcp-session-id: $SESSION_ID" \
+    -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' > /dev/null 2>&1
+  echo "Session: $SESSION_ID"
+}
+
+# ── Helper: send MCP tool call, return JSON-RPC result ──────
+mcp_call() {
+  local tool_name="$1"
+  local args_json="$2"
+  CALL_ID=$((CALL_ID + 1))
+  local payload="{\"jsonrpc\":\"2.0\",\"id\":${CALL_ID},\"method\":\"tools/call\",\"params\":{\"name\":\"${tool_name}\",\"arguments\":${args_json}}}"
+  local raw
+  raw=$(curl -s -N --max-time 30 -X POST "$BASE_URL" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "mcp-session-id: $SESSION_ID" \
+    -d "$payload")
+
+  # Handle SSE format (data: lines) or plain JSON
+  if echo "$raw" | grep -q '^data: '; then
+    echo "$raw" | grep '^data: ' | grep '"jsonrpc"' | head -1 | sed 's/^data: //'
+  else
+    echo "$raw"
+  fi
+}
+
+# ── Helper: extract text content from MCP result ────────────
+extract_text() {
+  python3 -c "
+import sys, json
+data = json.loads(sys.stdin.read())
+content = data.get('result', {}).get('content', [])
+for c in content:
+    if c.get('type') == 'text':
+        print(c['text'])
+        break
+" <<< "$1"
+}
+
+# ── Helper: check if MCP result is an error ─────────────────
+is_error() {
+  python3 -c "
+import sys, json
+data = json.loads(sys.stdin.read())
+print('true' if data.get('result', {}).get('isError') else 'false')
+" <<< "$1"
+}
+
+report() {
+  local test_num="$1"
+  local desc="$2"
+  local passed="$3"
+  local detail="${4:-}"
+  if [ "$passed" = "true" ]; then
+    echo "Test $test_num: $desc ... PASS"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    echo "Test $test_num: $desc ... FAIL"
+    if [ -n "$detail" ]; then
+      echo "  Detail: $detail"
+    fi
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+echo "================================================================="
+echo "Fractal MCP -- Template-Driven Canon Types Test Suite"
+echo "================================================================="
+echo ""
+
+# Initialize MCP session
+init_session
+echo ""
+
+# Clean test directory
+rm -rf "$TEST_DIR"
+echo "Cleaned test directory: $TEST_DIR"
+echo ""
+
+# =========================================================================
+# Test 1: list_templates
+# =========================================================================
+echo "--- Test 1: list_templates ---"
+RESULT=$(mcp_call "list_templates" '{}')
+TEXT=$(extract_text "$RESULT")
+T1_PASS=$(python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+ids = {t['id'] for t in data}
+required = {'fiction-default', 'worldbuilding', 'litrpg', 'fanfic'}
+if required.issubset(ids):
+    print('true')
+else:
+    print('false|Missing: ' + str(required - ids))
+" <<< "$TEXT")
+
+if [ "$(echo "$T1_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 1 "list_templates returns at least 4 templates" "true"
+else
+  report 1 "list_templates returns at least 4 templates" "false" "$(echo "$T1_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 2: get_template returns full contents
+# =========================================================================
+echo "--- Test 2: get_template ---"
+RESULT=$(mcp_call "get_template" '{"template_id":"litrpg"}')
+TEXT=$(extract_text "$RESULT")
+T2_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+ids = [c['id'] for c in d.get('canon_types', [])]
+has_guide = d.get('guide') is not None and len(d.get('guide', '')) > 100
+has_themes = len(d.get('themes', [])) > 0
+has_bestiary = 'bestiary' in ids
+ok = has_guide and has_themes and has_bestiary and len(ids) == 6
+print('true' if ok else 'false|canon_types=' + str(ids) + ' guide_len=' + str(len(d.get('guide',''))) + ' themes=' + str(d.get('themes')))
+" <<< "$TEXT")
+
+if [ "$(echo "$T2_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 2 "get_template returns full litrpg (6 types, themes, guide)" "true"
+else
+  report 2 "get_template returns full litrpg (6 types, themes, guide)" "false" "$(echo "$T2_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 3: create_project without template
+# =========================================================================
+echo "--- Test 3: create_project without template ---"
+RESULT=$(mcp_call "create_project" '{"project":"_fractal-test","title":"Template Test"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 3 "create_project without template" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T3_PASS="true"
+  T3_DETAIL=""
+
+  [ ! -d "$TEST_DIR/canon/characters" ] && T3_PASS="false" && T3_DETAIL="canon/characters/ missing"
+  [ ! -d "$TEST_DIR/canon/locations" ] && T3_PASS="false" && T3_DETAIL="$T3_DETAIL; canon/locations/ missing"
+
+  HAS_CT=$(python3 -c "
+import json; d = json.load(open('$TEST_DIR/project.json'))
+print('true' if 'canon_types' in d and len(d['canon_types']) > 0 else 'false')
+")
+  [ "$HAS_CT" != "true" ] && T3_PASS="false" && T3_DETAIL="$T3_DETAIL; project.json missing canon_types"
+
+  report 3 "create_project without template -- filesystem checks" "$T3_PASS" "$T3_DETAIL"
+fi
+
+# =========================================================================
+# Test 4: get_project enrichment (no template)
+# =========================================================================
+echo "--- Test 4: get_project enrichment ---"
+RESULT=$(mcp_call "get_project" '{"project":"_fractal-test"}')
+TEXT=$(extract_text "$RESULT")
+T4_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+ok = (
+    'canon_types_active' in d
+    and 'has_guide' in d
+    and set(d.get('canon_types_active', [])) == {'characters', 'locations'}
+    and d.get('has_guide') == False
+)
+print('true' if ok else 'false|canon_types_active=' + str(d.get('canon_types_active')) + ' has_guide=' + str(d.get('has_guide')))
+" <<< "$TEXT")
+
+if [ "$(echo "$T4_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 4 "get_project returns canon_types_active=[characters,locations], has_guide=false" "true"
+else
+  report 4 "get_project returns canon_types_active=[characters,locations], has_guide=false" "false" "$(echo "$T4_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 5: apply_template to existing project (adds dirs + GUIDE.md)
+# =========================================================================
+echo "--- Test 5: apply_template (worldbuilding -> existing project) ---"
+RESULT=$(mcp_call "apply_template" '{"project":"_fractal-test","template_id":"worldbuilding"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 5 "apply_template worldbuilding" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T5_PASS="true"
+  T5_DETAIL=""
+
+  for dir in characters locations factions lore systems; do
+    [ ! -d "$TEST_DIR/canon/$dir" ] && T5_PASS="false" && T5_DETAIL="$T5_DETAIL canon/$dir/ missing;"
+  done
+  [ ! -f "$TEST_DIR/GUIDE.md" ] && T5_PASS="false" && T5_DETAIL="$T5_DETAIL GUIDE.md missing;"
+
+  CANON_COUNT=$(python3 -c "
+import json; d = json.load(open('$TEST_DIR/project.json'))
+print(len(d.get('canon_types', [])))
+")
+  # Should have 5: original 2 (characters, locations) + 3 new (factions, lore, systems)
+  [ "$CANON_COUNT" != "5" ] && T5_PASS="false" && T5_DETAIL="$T5_DETAIL canon_types count=$CANON_COUNT (expected 5);"
+
+  TEXT=$(extract_text "$RESULT")
+  GUIDE_UPDATED=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+print('true' if d.get('guide_updated') else 'false')
+" <<< "$TEXT")
+  [ "$GUIDE_UPDATED" != "true" ] && T5_PASS="false" && T5_DETAIL="$T5_DETAIL guide_updated=$GUIDE_UPDATED;"
+
+  report 5 "apply_template adds canon dirs and GUIDE.md" "$T5_PASS" "$T5_DETAIL"
+fi
+
+# =========================================================================
+# Test 6: get_project reflects applied template
+# =========================================================================
+echo "--- Test 6: get_project after apply_template ---"
+RESULT=$(mcp_call "get_project" '{"project":"_fractal-test"}')
+TEXT=$(extract_text "$RESULT")
+T6_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+active = set(d.get('canon_types_active', []))
+expected = {'characters', 'locations', 'factions', 'lore', 'systems'}
+ok = active == expected and d.get('has_guide') == True
+print('true' if ok else 'false|active=' + str(sorted(active)) + ' has_guide=' + str(d.get('has_guide')))
+" <<< "$TEXT")
+
+if [ "$(echo "$T6_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 6 "get_project lists all 5 canon types and has_guide=true" "true"
+else
+  report 6 "get_project lists all 5 canon types and has_guide=true" "false" "$(echo "$T6_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 7: update_template creates a new custom template
+# =========================================================================
+echo "--- Test 7: update_template (create custom) ---"
+RESULT=$(mcp_call "update_template" '{"template_id":"_test-custom","name":"Test Custom","description":"A test template","canon_types":[{"id":"characters","label":"Characters","description":"People"},{"id":"tech","label":"Technology","description":"Gadgets and inventions"}],"themes":["innovation","disruption"],"guide":"# Custom Guide\n\nA minimal test guide."}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 7 "update_template create custom" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  # Verify by reading it back
+  RESULT2=$(mcp_call "get_template" '{"template_id":"_test-custom"}')
+  TEXT2=$(extract_text "$RESULT2")
+  T7_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+ids = [c['id'] for c in d.get('canon_types', [])]
+ok = d.get('name') == 'Test Custom' and 'tech' in ids and len(d.get('themes',[])) == 2
+print('true' if ok else 'false|name=' + str(d.get('name')) + ' types=' + str(ids) + ' themes=' + str(d.get('themes')))
+" <<< "$TEXT2")
+
+  if [ "$(echo "$T7_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 7 "update_template creates and get_template reads back" "true"
+  else
+    report 7 "update_template creates and get_template reads back" "false" "$(echo "$T7_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+# =========================================================================
+# Test 8: create canon with custom type (factions)
+# =========================================================================
+echo "--- Test 8: update_canon with custom type (factions) ---"
+RESULT=$(mcp_call "update_canon" '{"project":"_fractal-test","type":"factions","id":"the-guild","content":"# The Guild\n\nA powerful faction."}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 8 "update_canon with custom type (factions)" "false" "$(extract_text "$RESULT")"
+else
+  if [ -f "$TEST_DIR/canon/factions/the-guild.md" ]; then
+    report 8 "update_canon with custom type (factions)" "true"
+  else
+    report 8 "update_canon with custom type (factions)" "false" "File not on disk"
+  fi
+fi
+
+# =========================================================================
+# Test 9: get_canon for custom type
+# =========================================================================
+echo "--- Test 9: get_canon for factions/the-guild ---"
+RESULT=$(mcp_call "get_canon" '{"project":"_fractal-test","type":"factions","id":"the-guild"}')
+TEXT=$(extract_text "$RESULT")
+T9_PASS=$(python3 -c "
+import sys
+text = sys.stdin.read()
+ok = '# The Guild' in text and 'powerful faction' in text
+print('true' if ok else 'false|Content: ' + repr(text[:200]))
+" <<< "$TEXT")
+
+if [ "$(echo "$T9_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 9 "get_canon returns correct factions content" "true"
+else
+  report 9 "get_canon returns correct factions content" "false" "$(echo "$T9_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 10: get_context with guide
+# =========================================================================
+echo "--- Test 10: get_context with guide and canon ---"
+
+# Create part and chapter
+mcp_call "create_part" '{"project":"_fractal-test","part_id":"part-01","title":"Part One"}' > /dev/null
+mcp_call "create_chapter" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","title":"Chapter One"}' > /dev/null
+
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"guide":true,"canon":["the-guild"]}}')
+TEXT=$(extract_text "$RESULT")
+T10_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+has_guide = d.get('guide') is not None and len(str(d.get('guide', ''))) > 10
+canon = d.get('canon', {})
+has_canon = 'the-guild' in canon
+content_ok = '# The Guild' in canon.get('the-guild', {}).get('content', '') if has_canon else False
+ok = has_guide and has_canon and content_ok
+print('true' if ok else 'false|has_guide=' + str(has_guide) + ' has_canon=' + str(has_canon) + ' content_ok=' + str(content_ok))
+" <<< "$TEXT")
+
+if [ "$(echo "$T10_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 10 "get_context returns guide and canon entry" "true"
+else
+  report 10 "get_context returns guide and canon entry" "false" "$(echo "$T10_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 11: resolveCanon via get_context (factions auto-discovery)
+# =========================================================================
+echo "--- Test 11: resolveCanon discovers the-guild in factions/ ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["the-guild"]}}')
+TEXT=$(extract_text "$RESULT")
+T11_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('the-guild', {})
+resolved_type = entry.get('type', '')
+content = entry.get('content', '')
+ok = resolved_type == 'factions' and '# The Guild' in content
+print('true' if ok else 'false|type=' + str(resolved_type) + ' content_has_guild=' + str('# The Guild' in content))
+" <<< "$TEXT")
+
+if [ "$(echo "$T11_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 11 "resolveCanon resolves the-guild from factions/" "true"
+else
+  report 11 "resolveCanon resolves the-guild from factions/" "false" "$(echo "$T11_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 12: backward compat -- project without canon_types field
+# =========================================================================
+echo "--- Test 12: backward compat -- velvet-bond (no canon_types in project.json) ---"
+RESULT=$(mcp_call "get_project" '{"project":"velvet-bond"}')
+TEXT=$(extract_text "$RESULT")
+T12_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+active = d.get('canon_types_active', [])
+has_guide_key = 'has_guide' in d
+has_chars = 'characters' in active
+has_locs = 'locations' in active
+ok = has_chars and has_locs and has_guide_key
+print('true' if ok else 'false|active=' + str(active) + ' has_guide_key=' + str(has_guide_key))
+" <<< "$TEXT")
+
+if [ "$(echo "$T12_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 12 "backward compat -- canon_types_active from filesystem scan" "true"
+else
+  report 12 "backward compat -- canon_types_active from filesystem scan" "false" "$(echo "$T12_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 13: apply_template is idempotent (re-apply doesn't duplicate)
+# =========================================================================
+echo "--- Test 13: apply_template idempotent ---"
+RESULT=$(mcp_call "apply_template" '{"project":"_fractal-test","template_id":"worldbuilding"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 13 "apply_template idempotent" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  CANON_COUNT=$(python3 -c "
+import json; d = json.load(open('$TEST_DIR/project.json'))
+print(len(d.get('canon_types', [])))
+")
+  # Should still be 5, not 10
+  if [ "$CANON_COUNT" = "5" ]; then
+    report 13 "apply_template idempotent -- still 5 canon types after re-apply" "true"
+  else
+    report 13 "apply_template idempotent -- still 5 canon types after re-apply" "false" "count=$CANON_COUNT (expected 5)"
+  fi
+fi
+
+# =========================================================================
+# Cleanup
+# =========================================================================
+rm -f /workspace/fractal/templates/_test-custom.json 2>/dev/null
+
+# =========================================================================
+# Summary
+# =========================================================================
+echo ""
+echo "================================================================="
+TOTAL=$((PASS_COUNT + FAIL_COUNT))
+echo "$PASS_COUNT/$TOTAL tests passed"
+if [ "$FAIL_COUNT" -gt 0 ]; then
+  echo "$FAIL_COUNT test(s) FAILED"
+  exit 1
+else
+  echo "All tests passed!"
+  exit 0
+fi
