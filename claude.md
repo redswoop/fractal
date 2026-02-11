@@ -444,11 +444,17 @@ qualitative judgments no mechanical test can:
 
 ### When to Run Tests
 
-After any change to `src/store.ts`, `src/server.ts`, or `src/git.ts`:
-1. Build check: `npx tsc --noEmit`
-2. Start the server: `npm run dev` (or restart if running)
-3. Run the full test plan against `_fractal-test`
-4. Report results with pass/fail counts and any failures
+**After any change to `src/store.ts`, `src/server.ts`, or `src/git.ts` — before committing:**
+
+```bash
+cd /workspace/fractal
+npm run build                          # must succeed
+# restart server on :3001 without auth (kill old process first)
+FRINGE_PROJECTS_ROOT=/workspace/fractal/projects node dist/server.js &
+bash test-templates.sh                 # all tests must pass
+```
+
+Do NOT commit or push until tests are green. Do NOT tell the user work is "done" without running tests. This is not optional.
 
 For minor changes (typo fixes, comment updates), build check alone is sufficient.
 For any change that touches tool logic, data handling, or file operations — run the full suite.
