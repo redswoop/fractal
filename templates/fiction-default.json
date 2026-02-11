@@ -14,6 +14,10 @@
       "description": "Places where scenes happen — cities, rooms, landscapes"
     }
   ],
-  "themes": [],
-  "guide": "# Fiction Canon Guide\n\n## Characters\nOne file per named character. Include:\n- Core facts (age, appearance, role)\n- Personality and voice notes\n- Arc trajectory\n- Constraints (things this character would never do)\n\n## Locations\nOne file per significant location. Include:\n- Physical description and atmosphere\n- What typically happens here\n- Sensory details (sounds, smells, light)\n"
+  "themes": [
+    "identity",
+    "power",
+    "connection"
+  ],
+  "guide": "# Fiction Canon Guide\n\n## Characters\n\nOne file per named character. The filename is the character ID used in beat metadata.\n\n### What to include\n\n- **Core facts**: Age, appearance, occupation, role in the story\n- **Voice**: How they talk — sentence length, vocabulary, verbal tics, what they avoid saying\n- **Personality**: Not adjectives — show it through default reactions. \"When cornered, she deflects with humor\" beats \"she is funny\"\n- **Arc trajectory**: Where they start emotionally, where they're headed, what has to break for them to change\n- **Constraints**: Things this character would *never* do — these are more useful than what they would do\n- **Relationships**: Who matters to them and why, described from their POV\n- **Secrets**: What they know that others don't, and what they don't know about themselves\n\n### What to avoid\n\n- Exhaustive physical descriptions (readers build their own image from a few key details)\n- Backstory dumps — only include history that actively drives present behavior\n- Trait lists without behavioral anchors\n\n## Locations\n\nOne file per significant location. Locations are not backdrops — they shape what characters do and feel.\n\n### What to include\n\n- **Physical layout**: Just enough to block scenes — where doors are, what's visible, where someone could hide\n- **Atmosphere**: Time of day, light quality, temperature, ambient sound\n- **Sensory signature**: The one detail that makes this place *this* place (the smell of chlorine, the hum of fluorescents)\n- **Emotional register**: What mood does this location push scenes toward? A kitchen argument hits different than a parking lot argument\n- **Rules**: What can and can't happen here — a library enforces quiet, a bar loosens tongues\n- **History**: Only if characters know it and it affects how they behave in the space\n"
 }
