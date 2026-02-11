@@ -15,13 +15,16 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import type { IncomingMessage } from "node:http";
 import { join } from "node:path";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import type { FastifyRequest, FastifyReply } from "fastify";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { EventStore } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
@@ -36,6 +39,82 @@ import { ensureGitRepo, autoCommit, sessionCommit } from "./git.js";
 const PORT = parseInt(process.env["PORT"] ?? "3001", 10);
 const SESSION_TTL_MS = parseInt(process.env["SESSION_TTL_MS"] ?? String(30 * 60 * 1000), 10);
 const REAPER_INTERVAL_MS = parseInt(process.env["REAPER_INTERVAL_MS"] ?? "60000", 10);
+
+// Auth / OIDC config (all optional — unset = auth disabled)
+const OIDC_ISSUER_URL = process.env["OIDC_ISSUER_URL"] ?? null;
+const OIDC_AUDIENCE = process.env["OIDC_AUDIENCE"] ?? null;
+const FRACTAL_PUBLIC_URL = process.env["FRACTAL_PUBLIC_URL"] ?? null;
+const OIDC_CLIENT_ID = process.env["OIDC_CLIENT_ID"] ?? null;
+const OIDC_CLIENT_SECRET = process.env["OIDC_CLIENT_SECRET"] ?? null;
+
+// ---------------------------------------------------------------------------
+// OIDC / Auth
+// ---------------------------------------------------------------------------
+
+interface OidcConfig {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint: string;
+  jwks_uri: string;
+}
+
+let oidcConfig: OidcConfig | null = null;
+let jwksKeySet: ReturnType<typeof createRemoteJWKSet> | null = null;
+
+async function initializeOidc(): Promise<void> {
+  if (!OIDC_ISSUER_URL) {
+    console.log("[auth] OIDC_ISSUER_URL not set — authentication disabled");
+    return;
+  }
+
+  // Attempt OIDC discovery
+  const discoveryUrls = [
+    `${OIDC_ISSUER_URL}/.well-known/openid-configuration`,
+    `${OIDC_ISSUER_URL}/webman/sso/.well-known/openid-configuration`,
+  ];
+
+  for (const url of discoveryUrls) {
+    try {
+      console.log(`[auth] Trying OIDC discovery: ${url}`);
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (res.ok) {
+        const d = (await res.json()) as Record<string, unknown>;
+        oidcConfig = {
+          issuer: (d.issuer as string) || OIDC_ISSUER_URL,
+          authorization_endpoint: d.authorization_endpoint as string,
+          token_endpoint: d.token_endpoint as string,
+          jwks_uri: d.jwks_uri as string,
+        };
+        console.log("[auth] OIDC discovery succeeded");
+        break;
+      }
+    } catch (err) {
+      console.warn(`[auth] Discovery failed for ${url}:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  // Fall back to well-known Synology paths
+  if (!oidcConfig) {
+    oidcConfig = {
+      issuer: OIDC_ISSUER_URL,
+      authorization_endpoint: `${OIDC_ISSUER_URL}/webman/sso/SSOOauth.cgi`,
+      token_endpoint: `${OIDC_ISSUER_URL}/webman/sso/SSOAccessToken.cgi`,
+      jwks_uri: `${OIDC_ISSUER_URL}/webman/sso/openid-jwks.json`,
+    };
+    console.log("[auth] Using fallback Synology OIDC endpoints");
+  }
+
+  jwksKeySet = createRemoteJWKSet(new URL(oidcConfig.jwks_uri), {
+    cooldownDuration: 30_000,
+    cacheMaxAge: 600_000,
+    timeoutDuration: 10_000,
+  });
+
+  console.log(`[auth] Issuer:   ${oidcConfig.issuer}`);
+  console.log(`[auth] Auth:     ${oidcConfig.authorization_endpoint}`);
+  console.log(`[auth] Token:    ${oidcConfig.token_endpoint}`);
+  console.log(`[auth] JWKS:     ${oidcConfig.jwks_uri}`);
+}
 
 // ---------------------------------------------------------------------------
 // Bounded event store (replaces SDK's InMemoryEventStore)
@@ -1150,20 +1229,69 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body,
 await app.register(cors, {
   origin: true,
   methods: ["GET", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Accept", "mcp-session-id", "Last-Event-ID", "mcp-protocol-version"],
+  allowedHeaders: ["Content-Type", "Accept", "Authorization", "mcp-session-id", "Last-Event-ID", "mcp-protocol-version"],
   exposedHeaders: ["mcp-session-id"],
 });
 
-// --- CORS on raw/hijacked responses ---
-app.addHook("onRequest", (request, reply, done) => {
+// --- CORS on raw/hijacked responses + JWT auth ---
+app.addHook("onRequest", async (request, reply) => {
+  // CORS headers must apply to all responses, including 401
   const origin = request.headers.origin;
   if (origin) {
     reply.raw.setHeader("Access-Control-Allow-Origin", origin);
     reply.raw.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    reply.raw.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, mcp-session-id, Last-Event-ID, mcp-protocol-version");
+    reply.raw.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, mcp-session-id, Last-Event-ID, mcp-protocol-version");
     reply.raw.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
   }
-  done();
+
+  // Skip auth if not configured
+  if (!oidcConfig || !jwksKeySet) return;
+
+  // Exempt routes
+  if (request.method === "OPTIONS") return;
+  if (request.url.startsWith("/.well-known/")) return;
+  if (request.url === "/health" || request.url === "/help") return;
+  if (request.url === "/oauth/register") return;
+
+  // Extract Bearer token
+  const authHeader = request.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    const meta = FRACTAL_PUBLIC_URL
+      ? ` resource_metadata="${FRACTAL_PUBLIC_URL}/.well-known/oauth-protected-resource"`
+      : "";
+    reply.header("WWW-Authenticate", `Bearer${meta}`);
+    return reply.code(401).send({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Unauthorized: missing Bearer token" },
+      id: null,
+    });
+  }
+
+  const token = authHeader.slice(7);
+  try {
+    const { payload } = await jwtVerify(token, jwksKeySet, {
+      issuer: oidcConfig.issuer,
+      audience: OIDC_AUDIENCE || undefined,
+      clockTolerance: 60,
+    });
+
+    // Attach AuthInfo to raw request — SDK reads req.auth in streamableHttp.js
+    (request.raw as IncomingMessage & { auth?: AuthInfo }).auth = {
+      token,
+      clientId: (payload.azp as string) ?? (payload.client_id as string) ?? "unknown",
+      scopes: typeof payload.scope === "string" ? payload.scope.split(" ") : [],
+      expiresAt: payload.exp,
+      extra: { sub: payload.sub, username: payload.preferred_username ?? payload.sub },
+    };
+  } catch (err) {
+    request.log.warn(`[auth] JWT verification failed: ${err instanceof Error ? err.message : err}`);
+    reply.header("WWW-Authenticate", 'Bearer error="invalid_token"');
+    return reply.code(401).send({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Unauthorized: invalid token" },
+      id: null,
+    });
+  }
 });
 
 // --- Health check ---
@@ -1250,6 +1378,63 @@ app.get("/help", async () => {
       ejectability: "Without this tool, each project is a folder of markdown files, JSON sidecars, and a git repo.",
     },
   };
+});
+
+// --- OAuth Protected Resource Metadata (RFC 9728) ---
+app.get("/.well-known/oauth-protected-resource", async (_request, reply) => {
+  if (!oidcConfig || !FRACTAL_PUBLIC_URL) {
+    return reply.code(404).send({ error: "Auth not configured" });
+  }
+  return {
+    resource: `${FRACTAL_PUBLIC_URL}/mcp`,
+    authorization_servers: [oidcConfig.issuer],
+    scopes_supported: [],
+  };
+});
+
+// --- OAuth Authorization Server Metadata (RFC 8414) ---
+app.get("/.well-known/oauth-authorization-server", async (_request, reply) => {
+  if (!oidcConfig) {
+    return reply.code(404).send({ error: "Auth not configured" });
+  }
+  const meta: Record<string, unknown> = {
+    issuer: oidcConfig.issuer,
+    authorization_endpoint: oidcConfig.authorization_endpoint,
+    token_endpoint: oidcConfig.token_endpoint,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["client_secret_post"],
+  };
+  // Advertise DCR endpoint so Claude.ai (or any MCP client) can obtain credentials
+  if (OIDC_CLIENT_ID && FRACTAL_PUBLIC_URL) {
+    meta.registration_endpoint = `${FRACTAL_PUBLIC_URL}/oauth/register`;
+  }
+  return meta;
+});
+
+// --- Dynamic Client Registration (RFC 7591) — passthrough to pre-configured creds ---
+app.post("/oauth/register", async (request, reply) => {
+  if (!OIDC_CLIENT_ID || !OIDC_CLIENT_SECRET || !oidcConfig) {
+    return reply.code(404).send({ error: "Client registration not configured" });
+  }
+
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  const redirectUris = (body.redirect_uris as string[] | undefined) ?? [];
+
+  // RFC 7591 response — hand back the pre-configured Synology SSO credentials
+  return reply.code(201).send({
+    client_id: OIDC_CLIENT_ID,
+    client_secret: OIDC_CLIENT_SECRET,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    client_secret_expires_at: 0, // never expires
+    redirect_uris: redirectUris,
+    token_endpoint_auth_method: "client_secret_post",
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    client_name: (body.client_name as string) ?? "MCP Client",
+    scope: (body.scope as string) ?? "openid",
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1353,6 +1538,8 @@ app.delete("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
 
 async function main() {
   try {
+    await initializeOidc();
+
     const projectsRoot = store.getProjectsRoot();
     const testRoot = store.getTestProjectsRoot();
     for (const dir of [projectsRoot, testRoot]) {
@@ -1388,6 +1575,7 @@ async function main() {
     console.log(`  Projects:     ${projectsRoot}`);
     console.log(`  Test:         ${testRoot}`);
     console.log(`  Session TTL:  ${SESSION_TTL_MS / 1000}s (reaper every ${REAPER_INTERVAL_MS / 1000}s)`);
+    console.log(`  Auth:         ${oidcConfig ? `enabled (issuer: ${oidcConfig.issuer})` : "disabled"}`);
     console.log(`  Loaded:       ${projects.map((p) => p.id).join(", ") || "(none)"}\n`);
   } catch (err) {
     app.log.error(err);
