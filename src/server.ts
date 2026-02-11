@@ -299,6 +299,84 @@ function createMcpServer(): McpServer {
     return jsonResult(templates);
   });
 
+  server.registerTool("get_template", {
+    title: "Get Template",
+    description:
+      "Returns the full contents of a project template — canon types, themes, " +
+      "and the guide text. Use this to consult a template's writing guidelines " +
+      "while working on a project.",
+    inputSchema: {
+      template_id: z.string().describe("Template ID, e.g. 'fiction-default', 'worldbuilding', 'litrpg', 'fanfic'. Use list_templates to see options."),
+    },
+  }, async ({ template_id }) => {
+    logToolCall("get_template", { template_id });
+    const template = await store.loadTemplate(template_id);
+    return jsonResult(template);
+  });
+
+  server.registerTool("update_template", {
+    title: "Update Template",
+    description:
+      "Create or update a project template. Provide the full template object — " +
+      "id, name, description, canon_types, themes, and guide. " +
+      "Changes take effect on the next create_project or apply_template call.",
+    inputSchema: {
+      template_id: z.string().describe("Template ID (used as filename, e.g. 'my-template')"),
+      name: z.string().describe("Display name, e.g. 'My Custom Template'"),
+      description: z.string().describe("One-line description of what this template is for"),
+      canon_types: z.array(z.object({
+        id: z.string().describe("Canon type ID, e.g. 'characters', 'factions'"),
+        label: z.string().describe("Display label"),
+        description: z.string().describe("What belongs in this canon type"),
+      })).describe("Canon types this template provides"),
+      themes: z.array(z.string()).optional().describe("Seed themes for projects using this template"),
+      guide: z.string().optional().describe("Markdown guide text — writing conventions, what to track per canon type"),
+    },
+  }, async ({ template_id, name, description, canon_types, themes, guide }) => {
+    logToolCall("update_template", { template_id });
+    const template: store.ProjectTemplate = {
+      id: template_id,
+      name,
+      description,
+      canon_types,
+      themes: themes ?? [],
+      guide: guide ?? null,
+    };
+    await store.saveTemplate(template);
+    return textResult(`Template "${template_id}" saved with ${canon_types.length} canon types.`);
+  });
+
+  server.registerTool("apply_template", {
+    title: "Apply Template",
+    description:
+      "Apply (or re-apply) a template to an existing project. Creates any missing " +
+      "canon directories, merges new canon types into project.json, and writes/overwrites " +
+      "GUIDE.md. Existing canon entries and prose are never deleted.",
+    inputSchema: {
+      project: projectParam,
+      template_id: z.string().describe("Template ID to apply"),
+    },
+  }, async ({ project, template_id }) => {
+    logToolCall("apply_template", { project, template_id });
+    const template = await store.loadTemplate(template_id);
+    const result = await store.applyTemplateToProject(project, template);
+    if (result.changed_files.length > 0) {
+      try {
+        await autoCommit(result.root, result.changed_files, `[auto] apply template: ${template_id}`);
+      } catch (err) {
+        console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
+      }
+    }
+    return jsonResult({
+      template_id,
+      created_dirs: result.created_dirs,
+      guide_updated: result.guide_updated,
+      message: result.created_dirs.length > 0
+        ? `Applied "${template_id}": created ${result.created_dirs.join(", ")}${result.guide_updated ? ", updated GUIDE.md" : ""}`
+        : `Applied "${template_id}": all canon dirs already exist${result.guide_updated ? ", updated GUIDE.md" : ""}`,
+    });
+  });
+
   server.registerTool("create_part", {
     title: "Create Part",
     description: "Create a new part directory with part.json and add it to the project's parts list. Must be called BEFORE create_chapter for this part. Workflow: create_part → create_chapter → add_beat → write_beat_prose.",
@@ -1326,9 +1404,13 @@ app.get("/help", async () => {
       management: {
         hello: "Proof-of-life greeting to verify the connector is working.",
         list_projects: "List all available projects (id, title, status).",
-        create_project: "Bootstrap a new project with all directories and starter files.",
+        create_project: "Bootstrap a new project with all directories and starter files. Accepts optional template param.",
         create_part: "Create a new part directory with part.json, add to project parts list.",
         create_chapter: "Create a new chapter (.md + .meta.json) inside a part, add to part chapters list.",
+        list_templates: "List available project templates (id, name, description).",
+        get_template: "Returns full template contents — canon types, themes, and guide text.",
+        update_template: "Create or update a template. Provide id, name, description, canon_types, themes, guide.",
+        apply_template: "Apply a template to an existing project — adds missing canon dirs, updates GUIDE.md.",
       },
       read: {
         get_project: "Top-level project metadata: title, logline, status, themes, parts list.",

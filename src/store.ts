@@ -366,6 +366,56 @@ export async function loadTemplate(templateId: string): Promise<ProjectTemplate>
   return readJson<ProjectTemplate>(templatePath);
 }
 
+export async function saveTemplate(template: ProjectTemplate): Promise<void> {
+  await mkdir(TEMPLATES_ROOT, { recursive: true });
+  const templatePath = join(TEMPLATES_ROOT, `${template.id}.json`);
+  await writeJson(templatePath, template);
+}
+
+export async function applyTemplateToProject(
+  projectId: string,
+  template: ProjectTemplate
+): Promise<{ root: string; created_dirs: string[]; guide_updated: boolean; changed_files: string[] }> {
+  const root = projectRoot(projectId);
+  const changedFiles: string[] = [];
+
+  // Create any missing canon directories
+  const createdDirs: string[] = [];
+  for (const ct of template.canon_types) {
+    const dir = join(root, "canon", ct.id);
+    if (!existsSync(dir)) {
+      await mkdir(dir, { recursive: true });
+      createdDirs.push(`canon/${ct.id}`);
+    }
+  }
+
+  // Update canon_types in project.json (merge — keep existing, add new)
+  const projectJsonPath = join(root, "project.json");
+  const projectData = await readJson<ProjectData>(projectJsonPath);
+  const existingIds = new Set((projectData.canon_types ?? []).map(ct => ct.id));
+  let typesAdded = false;
+  for (const ct of template.canon_types) {
+    if (!existingIds.has(ct.id)) {
+      projectData.canon_types = [...(projectData.canon_types ?? []), ct];
+      typesAdded = true;
+    }
+  }
+  if (typesAdded) {
+    await writeJson(projectJsonPath, projectData);
+    changedFiles.push("project.json");
+  }
+
+  // Write or overwrite GUIDE.md
+  let guideUpdated = false;
+  if (template.guide) {
+    await writeMd(join(root, "GUIDE.md"), template.guide);
+    changedFiles.push("GUIDE.md");
+    guideUpdated = true;
+  }
+
+  return { root, created_dirs: createdDirs, guide_updated: guideUpdated, changed_files: changedFiles };
+}
+
 // ---------------------------------------------------------------------------
 // Project management
 // ---------------------------------------------------------------------------
