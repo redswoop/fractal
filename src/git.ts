@@ -181,6 +181,19 @@ export async function translateLineNumber(
 }
 
 /**
+ * Get the message from the most recent [session] commit, or null if none.
+ */
+export async function lastSessionSummary(root: string): Promise<string | null> {
+  try {
+    const msg = await git(root, "log", "--grep=\\[session\\]", "--format=%s", "-1");
+    if (!msg) return null;
+    return msg.replace(/^\[session\]\s*/, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Create a session-level summary commit.
  */
 export async function sessionCommit(root: string, message: string): Promise<string | null> {

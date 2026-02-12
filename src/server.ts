@@ -30,7 +30,7 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 
 import * as store from "./store.js";
-import { ensureGitRepo, autoCommit, sessionCommit } from "./git.js";
+import { ensureGitRepo, autoCommit, sessionCommit, lastSessionSummary } from "./git.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -218,11 +218,40 @@ function logToolError(toolName: string, err: unknown) {
 // ---------------------------------------------------------------------------
 
 async function createMcpServer(): Promise<McpServer> {
-  // Build dynamic instructions with current project inventory
+  // Build dynamic instructions with current project inventory + status
   const projects = await store.listProjects();
-  const projectLines = projects.length > 0
-    ? projects.map((p) => `  - ${p.id}: "${p.title}" (${p.status})`).join("\n")
-    : "  (none — use create_project to start one)";
+
+  let projectLines: string;
+  if (projects.length === 0) {
+    projectLines = "  (none — use create_project to start one)";
+  } else {
+    const lines: string[] = [];
+    for (const p of projects) {
+      let line = `  - ${p.id}: "${p.title}" (${p.status})`;
+
+      // Enrich in-progress projects with status details
+      if (p.status === "in-progress") {
+        const details: string[] = [];
+        try {
+          const dirty = await store.getDirtyNodes(p.id);
+          if (dirty.length > 0) details.push(`${dirty.length} dirty node${dirty.length > 1 ? "s" : ""}`);
+        } catch { /* skip */ }
+        try {
+          const notes = await store.getAnnotations(p.id);
+          if (notes.notes.length > 0) details.push(`${notes.notes.length} open note${notes.notes.length > 1 ? "s" : ""}`);
+        } catch { /* skip */ }
+        try {
+          const root = store.projectRoot(p.id);
+          const session = await lastSessionSummary(root);
+          if (session) details.push(`last session: ${session}`);
+        } catch { /* skip */ }
+        if (details.length > 0) line += `\n    ${details.join(", ")}`;
+      }
+
+      lines.push(line);
+    }
+    projectLines = lines.join("\n");
+  }
 
   const instructions = [
     "Fractal is a structured narrative authoring server.",
