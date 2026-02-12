@@ -4,7 +4,8 @@ FROM node:20-slim AS fractal-build
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 ARG CACHEBUST=0
-RUN git clone https://github.com/redswoop/fractal.git .
+ARG GIT_REF=main
+RUN git clone --branch ${GIT_REF} --single-branch https://github.com/redswoop/fractal.git .
 RUN npm ci && npm run build
 
 # ── Stage 2: Final image ────────────────────────────────────

@@ -1,9 +1,9 @@
 services:
-  webfrac:
-    build: .
-    # code-server port NOT exposed to host — only reachable via oauth2-proxy
+  # ── Stable: the version you trust for real writing ─────────
+  fractal:
+    image: skywarp75/fractal:${STABLE_VERSION:-latest}
     ports:
-      - "${HOST_PORT:-3011}:3001"    # Fractal MCP (Bearer token auth in-app)
+      - "${STABLE_PORT:-3001}:3001"
     environment:
       - GIT_USER_NAME=${GIT_USER_NAME:-Armen Nakashian}
       - GIT_USER_EMAIL=${GIT_USER_EMAIL:-anakashian@gmail.com}
@@ -14,6 +14,27 @@ services:
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
     volumes:
       - "${PROJECTS_PATH}:/projects/fractal/projects"
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # ── Experimental: the version you're testing ───────────────
+  fractal-exp:
+    profiles: ["experimental"]
+    image: skywarp75/fractal:experimental
+    ports:
+      - "${EXP_PORT:-3002}:3001"
+    environment:
+      - GIT_USER_NAME=${GIT_USER_NAME:-Armen Nakashian}
+      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-anakashian@gmail.com}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
+      - OIDC_AUDIENCE=${OIDC_AUDIENCE:-}
+      - FRACTAL_PUBLIC_URL=${FRACTAL_PUBLIC_URL:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
+    volumes:
+      - "${PROJECTS_PATH}:/projects/fractal/projects"
+    restart: unless-stopped
     networks:
       - internal
 
@@ -33,7 +54,7 @@ services:
       OAUTH2_PROXY_COOKIE_SECURE: "true"
       OAUTH2_PROXY_COOKIE_DOMAINS: "${COOKIE_DOMAIN}"
       OAUTH2_PROXY_REVERSE_PROXY: "true"
-      OAUTH2_PROXY_UPSTREAMS: "http://webfrac:8443"
+      OAUTH2_PROXY_UPSTREAMS: "http://fractal:8443"
       OAUTH2_PROXY_PROXY_WEBSOCKETS: "true"
       OAUTH2_PROXY_CODE_CHALLENGE_METHOD: "S256"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
@@ -41,7 +62,7 @@ services:
       OAUTH2_PROXY_EMAIL_DOMAINS: "*"
       OAUTH2_PROXY_SCOPE: "openid"
     depends_on:
-      - webfrac
+      - fractal
     restart: unless-stopped
     networks:
       - internal
