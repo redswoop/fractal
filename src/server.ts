@@ -217,11 +217,26 @@ function logToolError(toolName: string, err: unknown) {
 // MCP Server factory
 // ---------------------------------------------------------------------------
 
-function createMcpServer(): McpServer {
-  const server = new McpServer({
-    name: "fractal",
-    version: "1.0.0",
-  });
+async function createMcpServer(): Promise<McpServer> {
+  // Build dynamic instructions with current project inventory
+  const projects = await store.listProjects();
+  const projectLines = projects.length > 0
+    ? projects.map((p) => `  - ${p.id}: "${p.title}" (${p.status})`).join("\n")
+    : "  (none — use create_project to start one)";
+
+  const instructions = [
+    "Fractal is a structured narrative authoring server.",
+    "Use get_context as the primary read tool — it returns any combination of project data in one call.",
+    "All tools except list_projects and list_templates require a 'project' parameter.",
+    "",
+    "Current projects:",
+    projectLines,
+  ].join("\n");
+
+  const server = new McpServer(
+    { name: "fractal", version: "1.0.0" },
+    { instructions },
+  );
 
   // ===== PROJECT MANAGEMENT =====
 
@@ -1313,7 +1328,7 @@ app.post("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
         }
       };
 
-      const server = createMcpServer();
+      const server = await createMcpServer();
       await server.connect(transport);
       await transport.handleRequest(request.raw, reply.raw, request.body);
       return reply.hijack();
