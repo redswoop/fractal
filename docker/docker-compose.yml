@@ -1,0 +1,51 @@
+services:
+  webfrac:
+    build: .
+    # code-server port NOT exposed to host — only reachable via oauth2-proxy
+    ports:
+      - "${HOST_PORT:-3011}:3001"    # Fractal MCP (Bearer token auth in-app)
+    environment:
+      - GIT_USER_NAME=${GIT_USER_NAME:-Armen Nakashian}
+      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-anakashian@gmail.com}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
+      - OIDC_AUDIENCE=${OIDC_AUDIENCE:-}
+      - FRACTAL_PUBLIC_URL=${FRACTAL_PUBLIC_URL:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
+    volumes:
+      - "${PROJECTS_PATH}:/projects/fractal/projects"
+    networks:
+      - internal
+
+  oauth2-proxy:
+    profiles: ["auth"]
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+    ports:
+      - "${HTTPS_PORT:-4180}:4180"
+    environment:
+      OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:4180"
+      OAUTH2_PROXY_PROVIDER: "oidc"
+      OAUTH2_PROXY_OIDC_ISSUER_URL: "${OIDC_ISSUER_URL}"
+      OAUTH2_PROXY_CLIENT_ID: "${OIDC_CLIENT_ID}"
+      OAUTH2_PROXY_CLIENT_SECRET: "${OIDC_CLIENT_SECRET}"
+      OAUTH2_PROXY_REDIRECT_URL: "${EXTERNAL_URL}/oauth2/callback"
+      OAUTH2_PROXY_COOKIE_SECRET: "${OAUTH2_PROXY_COOKIE_SECRET}"
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_COOKIE_DOMAINS: "${COOKIE_DOMAIN}"
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_UPSTREAMS: "http://webfrac:8443"
+      OAUTH2_PROXY_PROXY_WEBSOCKETS: "true"
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: "S256"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_OIDC_EMAIL_CLAIM: "sub"
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_SCOPE: "openid"
+    depends_on:
+      - webfrac
+    restart: unless-stopped
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge

@@ -1,0 +1,37 @@
+{
+  "editor.wordWrap": "on",
+  "editor.wordWrapColumn": 80,
+  "editor.fontSize": 15,
+  "editor.lineHeight": 1.8,
+  "editor.fontFamily": "'Droid Sans Mono', 'monospace'",
+  "editor.minimap.enabled": false,
+  "editor.renderWhitespace": "none",
+  "editor.glyphMargin": false,
+  "editor.folding": true,
+  "editor.lineNumbers": "off",
+
+  "workbench.colorTheme": "Default Dark Modern",
+  "workbench.activityBar.location": "top",
+  "workbench.startupEditor": "none",
+
+  "markdown.preview.fontSize": 16,
+  "markdown.preview.lineHeight": 1.8,
+
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 1000,
+  "files.trimTrailingWhitespace": false,
+
+  "cSpell.language": "en",
+  "cSpell.enableFiletypes": ["markdown"],
+
+  "security.workspace.trust.enabled": false,
+
+  "terminal.integrated.profiles.linux": {
+    "noshell": {
+      "path": "/bin/false"
+    }
+  },
+  "terminal.integrated.defaultProfile.linux": "noshell",
+  "terminal.integrated.tabs.enabled": false,
+  "terminal.integrated.hideOnStartup": "always"
+}
