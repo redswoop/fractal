@@ -355,16 +355,21 @@ The `[auto]` commits happen per-operation. The `[session]` commits are summaries
 The MCP server exposes these operations. I call them from conversation.
 
 ### Read operations
-- `get_project()` → returns `project.json` — the top-level view
-- `get_part(part_id)` → returns `part.json` — part summary + chapter list
-- `get_chapter_meta(part_id, chapter_id)` → returns the meta.json — beats, status, summaries
-- `get_chapter_prose(part_id, chapter_id)` → returns the .md file — the actual text
-- `get_beat_prose(part_id, chapter_id, beat_id)` → extracts just one beat's prose from the chapter file
-- `get_canon(type, id)` → returns a canon file (character, location, etc.)
-- `get_scratch_index()` → returns scratch.json
-- `get_scratch(filename)` → returns a scratch file
-- `search(query, scope?)` → full-text search across prose, canon, scratch (scope limits it)
-- `get_dirty_nodes()` → returns all nodes with status != clean, with reasons
+- `get_context(include)` → primary read tool. Returns any combination of:
+  - `project_meta` — project.json enriched with `canon_types_active` and `has_guide`
+  - `parts` — part metadata by ID
+  - `chapter_meta` — chapter metadata by ref (`part-01/chapter-01`)
+  - `chapter_prose` — full prose with version token (`{prose, version}`)
+  - `beats` — individual beat prose by ref (`part-01/chapter-01:b01`)
+  - `beat_variants` — all variant blocks for a beat
+  - `canon` — canon entries by ID (type auto-resolved)
+  - `scratch` — scratch file content by filename
+  - `scratch_index` — scratch folder index
+  - `dirty_nodes` — all nodes flagged dirty/conflict
+  - `notes` — inline annotations with scope/type/author filters
+  - `canon_list` — list canon types (boolean) or entries within a type (string)
+  - `guide` — GUIDE.md content
+- `search(query, scope?)` → full-text search across prose, canon, scratch
 
 ### Write operations
 - `update_chapter_meta(part_id, chapter_id, patch)` → update beat summaries, status, deps
@@ -372,12 +377,16 @@ The MCP server exposes these operations. I call them from conversation.
 - `update_project(patch)` → update top-level metadata
 - `update_canon(type, id, content)` → rewrite a canon file
 - `write_beat_prose(part_id, chapter_id, beat_id, content)` → insert/replace prose for a beat
+- `edit_beat_prose(part_id, chapter_id, beat_id, edits)` → surgical string replacements within a beat
 - `add_beat(part_id, chapter_id, beat_def)` → add a new beat to the structure
 - `remove_beat(part_id, chapter_id, beat_id)` → remove a beat (prose moves to scratch)
-- `mark_dirty(node_ref, reason)` → flag a node as needing review
-- `mark_clean(node_ref)` → clear dirty status after review
+- `select_beat_variant(part_id, chapter_id, beat_id, keep_index)` → keep one variant, archive rest
+- `reorder_beats(part_id, chapter_id, beat_order)` → reorder beats in a chapter
+- `mark_node(node_ref, status, reason?)` → set dirty/clean status on a node
 - `add_scratch(filename, content, note)` → toss something in the scratch folder
 - `promote_scratch(filename, target)` → move scratch content into the narrative structure
+- `add_note(part_id, chapter_id, line_number, type, message?)` → insert inline annotation
+- `resolve_notes(note_ids)` → batch-remove annotations by ID
 
 ### Every write operation triggers a git commit.
 

@@ -223,19 +223,6 @@ function createMcpServer(): McpServer {
     version: "1.0.0",
   });
 
-  // ===== HELLO =====
-
-  server.registerTool("hello", {
-    title: "Hello",
-    description: "Say hello. Use this to verify the MCP connector is working.",
-    inputSchema: {
-      name: z.string().optional().describe("Who to greet"),
-    },
-  }, async ({ name }) => {
-    const who = name ?? "Captain";
-    return textResult(`Hello from Fractal, ${who}! The connector is alive.`);
-  });
-
   // ===== PROJECT MANAGEMENT =====
 
   server.registerTool("list_projects", {
@@ -436,142 +423,6 @@ function createMcpServer(): McpServer {
   // READ OPERATIONS
   // =================================================================
 
-  server.registerTool("get_project", {
-    title: "Get Project",
-    description: "Returns the top-level project.json — title, logline, status, themes, parts list, canon types.",
-    inputSchema: {
-      project: projectParam,
-    },
-  }, async ({ project }) => {
-    const data = await store.getProject(project);
-    const canonTypesActive = await store.listCanonTypes(project);
-    const root = store.projectRoot(project);
-    const hasGuide = existsSync(join(root, "GUIDE.md"));
-    return jsonResult({
-      ...data,
-      canon_types_active: canonTypesActive,
-      has_guide: hasGuide,
-    });
-  });
-
-  server.registerTool("get_part", {
-    title: "Get Part",
-    description: "Returns a part's metadata — title, summary, arc, status, chapter list.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
-    },
-  }, async ({ project, part_id }) => {
-    const data = await store.getPart(project, part_id);
-    return jsonResult(data);
-  });
-
-  server.registerTool("get_chapter_meta", {
-    title: "Get Chapter Meta",
-    description: "Returns a chapter's metadata — title, summary, POV, location, timeline position, beat index with statuses and summaries.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
-      chapter_id: z.string().describe("Chapter identifier, e.g. 'chapter-01'"),
-    },
-  }, async ({ project, part_id, chapter_id }) => {
-    const data = await store.getChapterMeta(project, part_id, chapter_id);
-    return jsonResult(data);
-  });
-
-  server.registerTool("get_chapter_prose", {
-    title: "Get Chapter Prose",
-    description: "Returns the full markdown prose of a chapter, including beat markers.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
-      chapter_id: z.string().describe("Chapter identifier, e.g. 'chapter-01'"),
-    },
-  }, async ({ project, part_id, chapter_id }) => {
-    const data = await store.getChapterProse(project, part_id, chapter_id);
-    const root = store.projectRoot(project);
-    const relPath = `parts/${part_id}/${chapter_id}.md`;
-    const { getFileVersion } = await import("./git.js");
-    const version = await getFileVersion(root, relPath);
-    return jsonResult({ prose: data, version });
-  });
-
-  server.registerTool("get_beat_prose", {
-    title: "Get Beat Prose",
-    description: "Extracts just one beat's prose from a chapter file.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier"),
-      chapter_id: z.string().describe("Chapter identifier"),
-      beat_id: z.string().describe("Beat identifier, e.g. 'b01'"),
-    },
-  }, async ({ project, part_id, chapter_id, beat_id }) => {
-    const data = await store.getBeatProse(project, part_id, chapter_id, beat_id);
-    return jsonResult(data);
-  });
-
-  server.registerTool("get_beat_variants", {
-    title: "Get Beat Variants",
-    description: "Returns all prose blocks for a given beat ID in a chapter. If a beat has multiple variant blocks (from append mode), this returns all of them in document order.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier"),
-      chapter_id: z.string().describe("Chapter identifier"),
-      beat_id: z.string().describe("Beat identifier, e.g. 'b01'"),
-    },
-  }, async ({ project, part_id, chapter_id, beat_id }) => {
-    const data = await store.getBeatVariants(project, part_id, chapter_id, beat_id);
-    return jsonResult(data);
-  });
-
-  server.registerTool("get_canon", {
-    title: "Get Canon",
-    description: "Returns a canon file (character, location, etc.) and its metadata sidecar.",
-    inputSchema: {
-      project: projectParam,
-      type: z.string().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions'. Use get_project to see active types."),
-      id: z.string().describe("Canon entry id, e.g. 'unit-7', 'the-bakery'"),
-    },
-  }, async ({ project, type, id }) => {
-    const data = await store.getCanon(project, type, id);
-    return jsonResult(data);
-  });
-
-  server.registerTool("list_canon", {
-    title: "List Canon",
-    description: "Lists all canon entries of a given type.",
-    inputSchema: {
-      project: projectParam,
-      type: z.string().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions'. Use get_project to see active types."),
-    },
-  }, async ({ project, type }) => {
-    const entries = await store.listCanon(project, type);
-    return jsonResult(entries);
-  });
-
-  server.registerTool("get_scratch_index", {
-    title: "Get Scratch Index",
-    description: "Returns the scratch folder index — loose scenes, dialogue riffs, ideas that don't have a home yet.",
-    inputSchema: {
-      project: projectParam,
-    },
-  }, async ({ project }) => {
-    const data = await store.getScratchIndex(project);
-    return jsonResult(data);
-  });
-
-  server.registerTool("get_scratch", {
-    title: "Get Scratch",
-    description: "Returns the content of a scratch file.",
-    inputSchema: {
-      project: projectParam,
-      filename: z.string().describe("Scratch filename, e.g. 'unit7-dream-sequence.md'"),
-    },
-  }, async ({ project, filename }) => {
-    const data = await store.getScratch(project, filename);
-    return textResult(data);
-  });
-
   server.registerTool("search", {
     title: "Search",
     description: "Full-text search across prose, canon, and scratch files. Returns matching lines with file paths and line numbers.",
@@ -592,26 +443,12 @@ function createMcpServer(): McpServer {
     return textResult(`${results.length} result(s) for "${query}":\n\n${formatted}`);
   });
 
-  server.registerTool("get_dirty_nodes", {
-    title: "Get Dirty Nodes",
-    description: "Returns all nodes with status 'dirty' or 'conflict', with reasons. Use this to triage what needs review.",
-    inputSchema: {
-      project: projectParam,
-    },
-  }, async ({ project }) => {
-    const nodes = await store.getDirtyNodes(project);
-    if (nodes.length === 0) {
-      return textResult("All clean. No dirty or conflicted nodes.");
-    }
-    return jsonResult(nodes);
-  });
 
   server.registerTool("get_context", {
     title: "Get Context",
     description:
-      "Batch read that returns a bundle of project data in one call. " +
-      "Pass a shopping list of canon IDs, beat refs, scratch filenames, etc. " +
-      "Use this instead of multiple individual get_ calls. " +
+      "Primary read tool — returns any combination of project data in one call. " +
+      "Pass a shopping list of what you need via the include object. " +
       "Partial failure — missing items go to errors, everything else returns normally.",
     inputSchema: {
       project: projectParam,
@@ -620,12 +457,19 @@ function createMcpServer(): McpServer {
         scratch: z.array(z.string()).optional().describe("Scratch filenames, e.g. ['voice-codex.md']"),
         parts: z.array(z.string()).optional().describe("Part IDs, e.g. ['part-01']"),
         chapter_meta: z.array(z.string()).optional().describe("Chapter refs, e.g. ['part-01/chapter-03']"),
-        chapter_prose: z.array(z.string()).optional().describe("Full chapter prose refs, e.g. ['part-01/chapter-03']"),
+        chapter_prose: z.array(z.string()).optional().describe("Full chapter prose refs, e.g. ['part-01/chapter-03']. Returns {prose, version}."),
         beats: z.array(z.string()).optional().describe("Beat refs, e.g. ['part-01/chapter-03:b01']"),
         beat_variants: z.array(z.string()).optional().describe("Beat refs for variant listing, e.g. ['part-01/chapter-03:b03']"),
         dirty_nodes: z.boolean().optional().describe("Include all dirty/conflict nodes"),
-        project_meta: z.boolean().optional().describe("Include top-level project metadata"),
+        project_meta: z.boolean().optional().describe("Include top-level project metadata (enriched with canon_types_active and has_guide)"),
         guide: z.boolean().optional().describe("Include GUIDE.md content from project root"),
+        notes: z.object({
+          scope: z.string().optional().describe("Scope filter: 'part-01', 'part-01/chapter-03', or 'part-01/chapter-03:b02'. Omit to scan entire project."),
+          type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).optional().describe("Filter by annotation type"),
+          author: z.string().optional().describe("Filter by author, e.g. 'human' or 'claude'"),
+        }).optional().describe("Include inline annotations. Pass {} for all, or add scope/type/author filters."),
+        scratch_index: z.boolean().optional().describe("Include the scratch folder index (scratch.json)"),
+        canon_list: z.union([z.boolean(), z.string()]).optional().describe("true = list canon types; string = list entries within that type, e.g. 'characters'"),
       }).describe("What to include. Every key is optional. Request exactly what you need."),
     },
   }, async ({ project, include }) => {
@@ -885,13 +729,13 @@ function createMcpServer(): McpServer {
 
   server.registerTool("select_beat_variant", {
     title: "Select Beat Variant",
-    description: "Pick one variant of a beat as the winner, archive the rest to scratch. Use get_beat_variants first to see all variants and decide which to keep.",
+    description: "Pick one variant of a beat as the winner, archive the rest to scratch. Use get_context with beat_variants include first to see all variants and decide which to keep.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier"),
       chapter_id: z.string().describe("Chapter identifier"),
       beat_id: z.string().describe("Beat identifier"),
-      keep_index: z.number().describe("Zero-based index of the variant to keep (from get_beat_variants)"),
+      keep_index: z.number().describe("Zero-based index of the variant to keep (from get_context beat_variants)"),
     },
   }, async ({ project, part_id, chapter_id, beat_id, keep_index }) => {
     logToolCall("select_beat_variant", { project, part_id, chapter_id, beat_id, keep_index });
@@ -946,59 +790,50 @@ function createMcpServer(): McpServer {
     }
   });
 
-  server.registerTool("mark_dirty", {
-    title: "Mark Dirty",
-    description: "Flag a node (part, chapter, or beat) as needing review due to upstream changes.",
+  server.registerTool("mark_node", {
+    title: "Mark Node",
+    description: "Set a node's dirty/clean status. Use status='dirty' with a reason to flag a node for review, or status='clean' to clear it.",
     inputSchema: {
       project: projectParam,
       node_ref: z.string().describe("Node reference, e.g. 'part-01', 'part-01/chapter-02', 'part-01/chapter-02:b03'"),
-      reason: z.string().describe("Why this node is dirty, e.g. 'marguerite.md canon updated: backstory changed'"),
+      status: z.enum(["dirty", "clean"]).describe("'dirty' to flag for review, 'clean' to clear"),
+      reason: z.string().optional().describe("Why this node is dirty (required when status='dirty', ignored when 'clean')"),
     },
-  }, async ({ project, node_ref, reason }) => {
-    logToolCall("mark_dirty", { project, node_ref, reason });
+  }, async ({ project, node_ref, status, reason }) => {
+    logToolCall("mark_node", { project, node_ref, status, reason });
     try {
+      if (status === "dirty" && !reason) {
+        throw new Error("reason is required when marking a node dirty");
+      }
       const root = store.projectRoot(project);
-      const results = await withCommit(
-        root,
-        () => store.markDirty(project, node_ref, reason),
-        `Marked ${node_ref} dirty (${reason})`
-      );
-      return jsonResult(results);
+      if (status === "dirty") {
+        const results = await withCommit(
+          root,
+          () => store.markDirty(project, node_ref, reason!),
+          `Marked ${node_ref} dirty (${reason})`
+        );
+        return jsonResult(results);
+      } else {
+        const results = await withCommit(
+          root,
+          () => store.markClean(project, node_ref),
+          `Marked ${node_ref} clean`
+        );
+        return jsonResult(results);
+      }
     } catch (err) {
-      logToolError("mark_dirty", err);
+      logToolError("mark_node", err);
       throw err;
     }
   });
 
-  server.registerTool("mark_clean", {
-    title: "Mark Clean",
-    description: "Clear dirty status after reviewing a node.",
-    inputSchema: {
-      project: projectParam,
-      node_ref: z.string().describe("Node reference to mark clean"),
-    },
-  }, async ({ project, node_ref }) => {
-    logToolCall("mark_clean", { project, node_ref });
-    try {
-      const root = store.projectRoot(project);
-      const results = await withCommit(
-        root,
-        () => store.markClean(project, node_ref),
-        `Marked ${node_ref} clean`
-      );
-      return jsonResult(results);
-    } catch (err) {
-      logToolError("mark_clean", err);
-      throw err;
-    }
-  });
 
   server.registerTool("update_canon", {
     title: "Update Canon",
     description: "Create or rewrite a canon file (character, location, etc.).",
     inputSchema: {
       project: projectParam,
-      type: z.string().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions'. Use get_project to see active types."),
+      type: z.string().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions'. Use get_context with canon_list: true to see active types."),
       id: z.string().describe("Canon entry id"),
       content: z.string().describe("Full markdown content for the canon file"),
       meta: z.object({
@@ -1084,38 +919,12 @@ function createMcpServer(): McpServer {
   // Annotation tools
   // -----------------------------------------------------------------------
 
-  server.registerTool("get_notes", {
-    title: "Get Notes",
-    description:
-      "Scan prose files for inline annotations (@note, @dev, @line, @continuity, @query, @flag). " +
-      "Returns structured notes with location context and surrounding prose lines, plus a summary with counts by type and author. " +
-      "Scope can be a part, chapter, or beat reference to narrow the scan.",
-    inputSchema: {
-      project: projectParam,
-      scope: z.string().optional().describe(
-        "Scope filter: 'part-01' (all chapters in part), 'part-01/chapter-03' (one chapter), or 'part-01/chapter-03:b02' (one beat). Omit to scan entire project."
-      ),
-      type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).optional().describe(
-        "Filter by annotation type"
-      ),
-      author: z.enum(["human", "claude"]).optional().describe(
-        "Filter by author"
-      ),
-    },
-  }, async ({ project, scope, type, author }) => {
-    const data = await store.getAnnotations(project, scope, type, author);
-    if (data.notes.length === 0) {
-      return textResult("No annotations found" + (scope ? ` in ${scope}` : "") + ".");
-    }
-    return jsonResult(data);
-  });
-
   server.registerTool("add_note", {
     title: "Add Note",
     description:
       "Insert an inline annotation in a chapter's prose, anchored after a specific line number. " +
       "Author is automatically set to 'claude'. The annotation is an HTML comment invisible in rendered markdown. " +
-      "Optionally pass a version token (from get_notes or a previous add_note) for line-number translation if the file changed.",
+      "Optionally pass a version token (from a previous add_note or get_context notes) for line-number translation if the file changed.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
@@ -1128,7 +937,7 @@ function createMcpServer(): McpServer {
         "The annotation message. Required for all types except 'flag'."
       ),
       version: z.string().optional().describe(
-        "Version token from get_notes or previous add_note. If the file changed since this version, line numbers are translated automatically. Omit on first insert."
+        "Version token from a previous add_note or get_context notes response. If the file changed since this version, line numbers are translated automatically. Omit on first insert."
       ),
     },
   }, async ({ project, part_id, chapter_id, line_number, type, message, version }) => {
@@ -1172,51 +981,15 @@ function createMcpServer(): McpServer {
     }
   });
 
-  server.registerTool("resolve_note", {
-    title: "Resolve Note",
-    description:
-      "Remove a single inline annotation from a prose file after it's been addressed. " +
-      "Pass the note ID from get_notes. The annotation line is deleted from the markdown. Git remembers it. " +
-      "Note: resolving one note shifts line numbers, making other note IDs from the same get_notes call stale. " +
-      "Either batch-resolve with resolve_notes, or re-read with get_notes between individual resolves.",
-    inputSchema: {
-      project: projectParam,
-      note_id: z.string().describe(
-        "Note ID to resolve, e.g. 'part-01/chapter-03:b02:n47'. Get this from get_notes."
-      ),
-    },
-  }, async ({ project, note_id }) => {
-    logToolCall("resolve_note", { project, note_id });
-    try {
-      const root = store.projectRoot(project);
-      const results = await store.removeAnnotationLines(project, [note_id]);
-      const files = results.map((r) =>
-        r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path
-      );
-      if (files.length > 0) {
-        try {
-          await autoCommit(root, files, `Resolved annotation ${note_id}`);
-        } catch (err) {
-          console.error(`[git-warning] Auto-commit failed:`,
-            err instanceof Error ? err.message : err);
-        }
-      }
-      return jsonResult({ resolved: 1, note_id });
-    } catch (err) {
-      logToolError("resolve_note", err);
-      throw err;
-    }
-  });
-
   server.registerTool("resolve_notes", {
     title: "Resolve Notes",
     description:
       "Batch-remove multiple inline annotations from prose files after they've been addressed. " +
-      "Pass note IDs from get_notes.",
+      "Pass note IDs from get_context with notes include.",
     inputSchema: {
       project: projectParam,
       note_ids: z.array(z.string()).describe(
-        "Note IDs to resolve, e.g. ['part-01/chapter-03:b02:n47']. Get these from get_notes."
+        "Note IDs to resolve, e.g. ['part-01/chapter-03:b02:n47']. Get these from get_context with notes include."
       ),
     },
   }, async ({ project, note_ids }) => {
@@ -1399,10 +1172,9 @@ app.get("/help", async () => {
     name: "Fractal",
     description: "Fractal narrative MCP server (multi-project)",
     projects_root: store.getProjectsRoot(),
-    note: "All tools except hello and list_projects require a 'project' parameter.",
+    note: "All tools except list_projects and list_templates require a 'project' parameter.",
     tools: {
       management: {
-        hello: "Proof-of-life greeting to verify the connector is working.",
         list_projects: "List all available projects (id, title, status).",
         create_project: "Bootstrap a new project with all directories and starter files. Accepts optional template param.",
         create_part: "Create a new part directory with part.json, add to project parts list.",
@@ -1413,19 +1185,8 @@ app.get("/help", async () => {
         apply_template: "Apply a template to an existing project — adds missing canon dirs, updates GUIDE.md.",
       },
       read: {
-        get_project: "Top-level project metadata: title, logline, status, themes, parts list.",
-        get_part: "Part metadata: title, summary, arc, status, chapter list.",
-        get_chapter_meta: "Chapter metadata: title, summary, POV, location, timeline, beat index with statuses.",
-        get_chapter_prose: "Full markdown prose of a chapter, including beat markers and variants. Returns {prose, version}.",
-        get_beat_prose: "Extract a single beat's prose (first block only if variants exist).",
-        get_beat_variants: "Returns all prose blocks (variants) for a beat ID, in document order.",
-        get_canon: "A canon file (character, location) and its metadata sidecar.",
-        list_canon: "List all canon entries of a given type (characters, locations).",
-        get_scratch_index: "Index of the scratch folder — loose scenes, dialogue, ideas.",
-        get_scratch: "Content of a specific scratch file.",
+        get_context: "Primary read tool — returns any combination of project data in one call. Supports: project_meta, parts, chapter_meta, chapter_prose (with version), beats, beat_variants, canon, scratch, scratch_index, dirty_nodes, notes, canon_list, guide.",
         search: "Full-text search across prose, canon, and scratch files.",
-        get_dirty_nodes: "All nodes flagged dirty or conflict, with reasons. Use for triage.",
-        get_context: "Batch read — canon, scratch, parts, chapters, beats, variants, dirty nodes in one call.",
       },
       write: {
         update_project: "Patch top-level project metadata.",
@@ -1437,17 +1198,14 @@ app.get("/help", async () => {
         remove_beat: "Remove a beat (all variant blocks) from a chapter. Prose moved to scratch.",
         select_beat_variant: "Keep one variant of a beat, archive the rest to scratch.",
         reorder_beats: "Reorder beats within a chapter (meta and prose). Variants stay grouped.",
-        mark_dirty: "Flag a node as needing review, with a reason.",
-        mark_clean: "Clear dirty status after reviewing a node.",
+        mark_node: "Set dirty/clean status on a node. status='dirty' requires a reason.",
         update_canon: "Create or rewrite a canon file (character, location, etc.).",
         add_scratch: "Add a new file to the scratch folder.",
         promote_scratch: "Move scratch content into a beat in the narrative structure.",
       },
       annotations: {
-        get_notes: "Scan prose for inline annotations. Filter by scope, type, author. Returns version hashes.",
         add_note: "Insert annotation after a line number. Optionally pass version for line translation. Author: claude.",
-        resolve_note: "Remove a single annotation after it's been addressed.",
-        resolve_notes: "Batch-remove multiple annotations.",
+        resolve_notes: "Batch-remove one or more annotations by ID.",
       },
       session: {
         session_summary: "Create a session-level git commit summarizing the working session.",

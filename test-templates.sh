@@ -178,27 +178,28 @@ print('true' if 'canon_types' in d and len(d['canon_types']) > 0 else 'false')
 fi
 
 # =========================================================================
-# Test 4: get_project enrichment (no template)
+# Test 4: get_context project_meta enrichment (no template)
 # =========================================================================
-echo "--- Test 4: get_project enrichment ---"
-RESULT=$(mcp_call "get_project" '{"project":"_fractal-test"}')
+echo "--- Test 4: get_context project_meta enrichment ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"project_meta":true}}')
 TEXT=$(extract_text "$RESULT")
 T4_PASS=$(python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
+pm = d.get('project_meta', {})
 ok = (
-    'canon_types_active' in d
-    and 'has_guide' in d
-    and set(d.get('canon_types_active', [])) == {'characters', 'locations'}
-    and d.get('has_guide') == False
+    'canon_types_active' in pm
+    and 'has_guide' in pm
+    and set(pm.get('canon_types_active', [])) == {'characters', 'locations'}
+    and pm.get('has_guide') == False
 )
-print('true' if ok else 'false|canon_types_active=' + str(d.get('canon_types_active')) + ' has_guide=' + str(d.get('has_guide')))
+print('true' if ok else 'false|canon_types_active=' + str(pm.get('canon_types_active')) + ' has_guide=' + str(pm.get('has_guide')))
 " <<< "$TEXT")
 
 if [ "$(echo "$T4_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 4 "get_project returns canon_types_active=[characters,locations], has_guide=false" "true"
+  report 4 "get_context project_meta returns canon_types_active=[characters,locations], has_guide=false" "true"
 else
-  report 4 "get_project returns canon_types_active=[characters,locations], has_guide=false" "false" "$(echo "$T4_PASS" | cut -d'|' -f2-)"
+  report 4 "get_context project_meta returns canon_types_active=[characters,locations], has_guide=false" "false" "$(echo "$T4_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
@@ -237,24 +238,25 @@ print('true' if d.get('guide_updated') else 'false')
 fi
 
 # =========================================================================
-# Test 6: get_project reflects applied template
+# Test 6: get_context project_meta reflects applied template
 # =========================================================================
-echo "--- Test 6: get_project after apply_template ---"
-RESULT=$(mcp_call "get_project" '{"project":"_fractal-test"}')
+echo "--- Test 6: get_context project_meta after apply_template ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"project_meta":true}}')
 TEXT=$(extract_text "$RESULT")
 T6_PASS=$(python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
-active = set(d.get('canon_types_active', []))
+pm = d.get('project_meta', {})
+active = set(pm.get('canon_types_active', []))
 expected = {'characters', 'locations', 'factions', 'lore', 'systems'}
-ok = active == expected and d.get('has_guide') == True
-print('true' if ok else 'false|active=' + str(sorted(active)) + ' has_guide=' + str(d.get('has_guide')))
+ok = active == expected and pm.get('has_guide') == True
+print('true' if ok else 'false|active=' + str(sorted(active)) + ' has_guide=' + str(pm.get('has_guide')))
 " <<< "$TEXT")
 
 if [ "$(echo "$T6_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 6 "get_project lists all 5 canon types and has_guide=true" "true"
+  report 6 "get_context project_meta lists all 5 canon types and has_guide=true" "true"
 else
-  report 6 "get_project lists all 5 canon types and has_guide=true" "false" "$(echo "$T6_PASS" | cut -d'|' -f2-)"
+  report 6 "get_context project_meta lists all 5 canon types and has_guide=true" "false" "$(echo "$T6_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
@@ -301,22 +303,24 @@ else
 fi
 
 # =========================================================================
-# Test 9: get_canon for custom type
+# Test 9: get_context canon for custom type
 # =========================================================================
-echo "--- Test 9: get_canon for factions/the-guild ---"
-RESULT=$(mcp_call "get_canon" '{"project":"_fractal-test","type":"factions","id":"the-guild"}')
+echo "--- Test 9: get_context canon for factions/the-guild ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["the-guild"]}}')
 TEXT=$(extract_text "$RESULT")
 T9_PASS=$(python3 -c "
-import sys
-text = sys.stdin.read()
-ok = '# The Guild' in text and 'powerful faction' in text
-print('true' if ok else 'false|Content: ' + repr(text[:200]))
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('the-guild', {})
+content = entry.get('content', '')
+ok = '# The Guild' in content and 'powerful faction' in content
+print('true' if ok else 'false|Content: ' + repr(content[:200]))
 " <<< "$TEXT")
 
 if [ "$(echo "$T9_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 9 "get_canon returns correct factions content" "true"
+  report 9 "get_context canon returns correct factions content" "true"
 else
-  report 9 "get_canon returns correct factions content" "false" "$(echo "$T9_PASS" | cut -d'|' -f2-)"
+  report 9 "get_context canon returns correct factions content" "false" "$(echo "$T9_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
@@ -373,13 +377,14 @@ fi
 # Test 12: backward compat -- project without canon_types field
 # =========================================================================
 echo "--- Test 12: backward compat -- velvet-bond (no canon_types in project.json) ---"
-RESULT=$(mcp_call "get_project" '{"project":"velvet-bond"}')
+RESULT=$(mcp_call "get_context" '{"project":"velvet-bond","include":{"project_meta":true}}')
 TEXT=$(extract_text "$RESULT")
 T12_PASS=$(python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
-active = d.get('canon_types_active', [])
-has_guide_key = 'has_guide' in d
+pm = d.get('project_meta', {})
+active = pm.get('canon_types_active', [])
+has_guide_key = 'has_guide' in pm
 has_chars = 'characters' in active
 has_locs = 'locations' in active
 ok = has_chars and has_locs and has_guide_key

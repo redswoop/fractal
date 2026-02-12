@@ -1583,6 +1583,9 @@ export interface ContextInclude {
   dirty_nodes?: boolean;
   project_meta?: boolean;
   guide?: boolean;
+  notes?: { scope?: string; type?: string; author?: string };
+  scratch_index?: boolean;
+  canon_list?: string | boolean;
 }
 
 export async function getContext(
@@ -1650,13 +1653,18 @@ export async function getContext(
     if (Object.keys(chapterMeta).length > 0) response.chapter_meta = chapterMeta;
   }
 
-  // Chapter prose
+  // Chapter prose — returns { prose, version } to match get_chapter_prose tool
   if (include.chapter_prose && include.chapter_prose.length > 0) {
-    const chapterProse: Record<string, string> = {};
+    const chapterProse: Record<string, unknown> = {};
     await Promise.all(include.chapter_prose.map(async (ref) => {
       try {
         const { partId, chapterId } = parseChapterRef(ref);
-        chapterProse[ref] = await getChapterProse(projectId, partId, chapterId);
+        const prose = await getChapterProse(projectId, partId, chapterId);
+        const root = projectRoot(projectId);
+        const relPath = join("parts", partId, `${chapterId}.md`);
+        const { getFileVersion } = await import("./git.js");
+        const version = await getFileVersion(root, relPath);
+        chapterProse[ref] = { prose, version };
       } catch (err) {
         errors[`chapter_prose:${ref}`] = err instanceof Error ? err.message : String(err);
       }
@@ -1702,10 +1710,14 @@ export async function getContext(
     }
   }
 
-  // Project meta
+  // Project meta — enriched with canon_types_active and has_guide
   if (include.project_meta) {
     try {
-      response.project_meta = await getProject(projectId);
+      const projectData = await getProject(projectId);
+      const canonTypesActive = await listCanonTypes(projectId);
+      const root = projectRoot(projectId);
+      const hasGuide = existsSync(join(root, "GUIDE.md"));
+      response.project_meta = { ...projectData, canon_types_active: canonTypesActive, has_guide: hasGuide };
     } catch (err) {
       errors["project_meta"] = err instanceof Error ? err.message : String(err);
     }
@@ -1722,6 +1734,38 @@ export async function getContext(
       }
     } catch (err) {
       errors["guide"] = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // Notes — inline annotations with optional filters
+  if (include.notes) {
+    try {
+      const { scope, type, author } = include.notes;
+      response.notes = await getAnnotations(projectId, scope, type, author);
+    } catch (err) {
+      errors["notes"] = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // Scratch index
+  if (include.scratch_index) {
+    try {
+      response.scratch_index = await getScratchIndex(projectId);
+    } catch (err) {
+      errors["scratch_index"] = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // Canon list — true for type listing, string for entries within a type
+  if (include.canon_list !== undefined && include.canon_list !== false) {
+    try {
+      if (include.canon_list === true) {
+        response.canon_list = await listCanonTypes(projectId);
+      } else {
+        response.canon_list = await listCanon(projectId, include.canon_list);
+      }
+    } catch (err) {
+      errors["canon_list"] = err instanceof Error ? err.message : String(err);
     }
   }
 
