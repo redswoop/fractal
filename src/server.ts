@@ -271,14 +271,36 @@ async function createMcpServer(): Promise<McpServer> {
 
   server.registerTool("list_projects", {
     title: "List Projects",
-    description: "List all available projects.",
+    description: "List all available projects with status briefing. In-progress projects include dirty node count, open note count, and last session summary.",
     inputSchema: {},
   }, async () => {
     const projects = await store.listProjects();
     if (projects.length === 0) {
       return textResult("No projects found. Use create_project to start one.");
     }
-    return jsonResult(projects);
+
+    const enriched = await Promise.all(projects.map(async (p) => {
+      if (p.status !== "in-progress") return p;
+
+      const extra: { dirty_nodes?: number; open_notes?: number; last_session?: string } = {};
+      try {
+        const dirty = await store.getDirtyNodes(p.id);
+        if (dirty.length > 0) extra.dirty_nodes = dirty.length;
+      } catch { /* skip */ }
+      try {
+        const notes = await store.getAnnotations(p.id);
+        if (notes.notes.length > 0) extra.open_notes = notes.notes.length;
+      } catch { /* skip */ }
+      try {
+        const root = store.projectRoot(p.id);
+        const session = await lastSessionSummary(root);
+        if (session) extra.last_session = session;
+      } catch { /* skip */ }
+
+      return { ...p, ...extra };
+    }));
+
+    return jsonResult(enriched);
   });
 
   server.registerTool("create_project", {
