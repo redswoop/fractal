@@ -1,5 +1,5 @@
 /**
- * git.ts — Auto-commit layer for Fringe projects.
+ * git.ts — Auto-commit layer for Fractal projects.
  *
  * Every write operation triggers a git commit with a meaningful message.
  * Commits are prefixed with [auto] for per-operation commits and

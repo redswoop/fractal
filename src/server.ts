@@ -7,8 +7,8 @@
  * Architecture:
  *   Claude.ai  -->  HTTPS (reverse proxy)  -->  HTTP (this server, port 3001)
  *
- * Supports multiple independent projects under FRINGE_PROJECTS_ROOT.
- * Every tool (except hello and list_projects) takes a `project` parameter.
+ * Supports multiple independent projects under FRACTAL_PROJECTS_ROOT.
+ * Every tool (except list_projects and list_templates) takes a `project` parameter.
  * Each project has its own git repo with automatic commits on writes.
  */
 

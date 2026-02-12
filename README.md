@@ -294,7 +294,7 @@ Point your MCP config at the running server's `/mcp` endpoint.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | Server port |
-| `FRINGE_PROJECTS_ROOT` | `./projects` | Where project directories live |
+| `FRACTAL_PROJECTS_ROOT` | `./projects` | Where project directories live |
 
 ## Project structure
 

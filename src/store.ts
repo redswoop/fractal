@@ -1,10 +1,10 @@
 /**
- * store.ts — File-system operations for Fringe projects.
+ * store.ts — File-system operations for Fractal projects.
  *
  * Pure read/write against the directory structure defined in claude.md.
  * No MCP awareness, no git awareness. Just files.
  *
- * Multi-project: FRINGE_PROJECTS_ROOT contains one subdirectory per project.
+ * Multi-project: FRACTAL_PROJECTS_ROOT contains one subdirectory per project.
  * Every function takes a projectId as the first parameter.
  */
 
@@ -18,11 +18,11 @@ import { join, resolve } from "node:path";
 // ---------------------------------------------------------------------------
 
 const PROJECTS_ROOT = resolve(
-  process.env["FRINGE_PROJECTS_ROOT"] ?? join(import.meta.dirname, "..", "projects")
+  process.env["FRACTAL_PROJECTS_ROOT"] ?? join(import.meta.dirname, "..", "projects")
 );
 
 const TEST_PROJECTS_ROOT = resolve(
-  process.env["FRINGE_TEST_PROJECTS_ROOT"] ?? join(import.meta.dirname, "..", "test-projects")
+  process.env["FRACTAL_TEST_PROJECTS_ROOT"] ?? join(import.meta.dirname, "..", "test-projects")
 );
 
 function isTestProject(projectId: string): boolean {
@@ -332,7 +332,7 @@ export interface ProjectTemplate {
 }
 
 const TEMPLATES_ROOT = resolve(
-  process.env["FRINGE_TEMPLATES_ROOT"] ?? join(import.meta.dirname, "..", "templates")
+  process.env["FRACTAL_TEMPLATES_ROOT"] ?? join(import.meta.dirname, "..", "templates")
 );
 
 const DEFAULT_CANON_TYPES: CanonTypeDefinition[] = [
