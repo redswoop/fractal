@@ -10,7 +10,7 @@ After ANY change to `src/server.ts`, `src/store.ts`, or `src/git.ts`:
 cd /workspace/fractal
 npm run build                          # must succeed
 # kill any existing server, then start fresh:
-FRINGE_PROJECTS_ROOT=/workspace/fractal/projects node dist/server.js &
+FRACTAL_PROJECTS_ROOT=/workspace/fractal/projects node dist/server.js &
 bash test-templates.sh                 # all tests must pass
 ```
 

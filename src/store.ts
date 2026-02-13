@@ -81,6 +81,7 @@ const ANNOTATION_TYPES = ["note", "dev", "line", "continuity", "query", "flag"] 
 type AnnotationType = (typeof ANNOTATION_TYPES)[number];
 const ANNOTATION_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*?))?\s*-->$/;
 const BEAT_MARKER_REGEX = /^<!--\s*beat:(\S+)\s*\|\s*(.+?)\s*-->/;
+const BEAT_BRIEF_REGEX = /^<!--\s*beat-brief:(\S+)\s*\[(PLANNED|WRITTEN|DIRTY(?::\s*[^\]]*)?|CONFLICT)\]\s*(.*?)\s*-->$/;
 
 export interface ParsedAnnotation {
   id: string;
@@ -101,6 +102,57 @@ export interface GetAnnotationsResult {
   notes: ParsedAnnotation[];
   summary: AnnotationSummary;
   versions: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
+// Beat summary comment helpers
+// ---------------------------------------------------------------------------
+
+function truncateSummary(summary: string, maxLen: number = 280): string {
+  if (summary.length <= maxLen) return summary;
+  const truncated = summary.slice(0, maxLen);
+  const lastSentence = Math.max(
+    truncated.lastIndexOf(". "),
+    truncated.lastIndexOf("! "),
+    truncated.lastIndexOf("? ")
+  );
+  if (lastSentence > maxLen * 0.5) {
+    return truncated.slice(0, lastSentence + 1);
+  }
+  const lastSpace = truncated.lastIndexOf(" ");
+  if (lastSpace > maxLen * 0.6) {
+    return truncated.slice(0, lastSpace) + "…";
+  }
+  return truncated + "…";
+}
+
+function buildSummaryComment(beat: BeatMeta): string | null {
+  if (!beat.summary) return null;
+  const statusTag = beat.status === "dirty" && beat.dirty_reason
+    ? `DIRTY: ${beat.dirty_reason}`
+    : beat.status.toUpperCase();
+  const text = truncateSummary(beat.summary);
+  return `<!-- beat-brief:${beat.id} [${statusTag}] ${text} -->`;
+}
+
+/**
+ * Strip a beat-brief summary comment from raw prose text.
+ * Scans the first few lines (stopping at the first real prose line)
+ * looking for a beat-brief comment. Returns the comment and clean prose.
+ */
+function stripSummaryComment(raw: string): { comment: string | null; prose: string } {
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i]!.trim();
+    if (BEAT_BRIEF_REGEX.test(trimmed)) {
+      const comment = trimmed;
+      const remaining = [...lines.slice(0, i), ...lines.slice(i + 1)].join("\n").trim();
+      return { comment, prose: remaining };
+    }
+    // Stop looking once we hit actual prose (non-empty, non-comment line)
+    if (trimmed && !trimmed.startsWith("<!--")) break;
+  }
+  return { comment: null, prose: raw };
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +188,8 @@ function parseBeats(markdown: string): ParsedBeat[] {
     if (chapterEnd !== -1 && chapterEnd < proseEnd) {
       proseEnd = chapterEnd;
     }
-    const prose = markdown.slice(current.end, proseEnd).trim();
+    const rawProse = markdown.slice(current.end, proseEnd).trim();
+    const { prose } = stripSummaryComment(rawProse);
     beats.push({ id: current.id, label: current.label, prose });
   }
 
@@ -148,14 +201,13 @@ function replaceOrInsertBeatProse(
   beatId: string,
   newProse: string
 ): string {
-  const beatRegex = new RegExp(
-    `(<!--\\s*beat:${beatId}\\s*\\|[^>]*-->)([\\s\\S]*?)(?=<!--\\s*(?:beat:\\S|/chapter))`
-  );
-  const match = beatRegex.exec(markdown);
-  if (match) {
-    return markdown.replace(beatRegex, `$1\n${newProse}\n\n`);
+  const parsed = parseBeatsGrouped(markdown);
+  const idx = parsed.blocks.findIndex((b) => b.id === beatId);
+  if (idx === -1) {
+    throw new Error(`Beat marker for ${beatId} not found in chapter file`);
   }
-  throw new Error(`Beat marker for ${beatId} not found in chapter file`);
+  parsed.blocks[idx] = { ...parsed.blocks[idx]!, prose: newProse };
+  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble);
 }
 
 function addBeatMarker(
@@ -199,6 +251,7 @@ function removeBeatMarker(markdown: string, beatId: string): { updated: string; 
 interface BeatBlock {
   id: string;
   label: string;
+  summaryComment: string | null;
   prose: string;
 }
 
@@ -236,8 +289,9 @@ function parseBeatsGrouped(markdown: string): {
   for (let i = 0; i < matches.length; i++) {
     const current = matches[i]!;
     const nextStart = i + 1 < matches.length ? matches[i + 1]!.index : contentEnd;
-    const prose = markdown.slice(current.end, nextStart).trim();
-    blocks.push({ id: current.id, label: current.label, prose });
+    const rawProse = markdown.slice(current.end, nextStart).trim();
+    const { comment, prose } = stripSummaryComment(rawProse);
+    blocks.push({ id: current.id, label: current.label, summaryComment: comment, prose });
   }
 
   return { preamble, blocks, postamble };
@@ -253,8 +307,14 @@ function reassembleChapter(
   if (result.length > 0 && !result.endsWith("\n")) {
     result += "\n";
   }
+  const emittedBriefs = new Set<string>();
   for (const block of blocks) {
     result += `<!-- beat:${block.id} | ${block.label} -->\n`;
+    // Emit summary comment only for the first block per beat ID (variant dedup)
+    if (block.summaryComment && !emittedBriefs.has(block.id)) {
+      result += `${block.summaryComment}\n`;
+      emittedBriefs.add(block.id);
+    }
     if (block.prose) {
       result += `${block.prose}\n\n`;
     } else {
@@ -305,8 +365,8 @@ function appendBeatBlock(
     throw new Error(`Beat marker for ${beatId} not found in chapter file — cannot append variant`);
   }
 
-  // Insert the new block after the last occurrence
-  const newBlock: BeatBlock = { id: beatId, label, prose: content };
+  // Insert the new block after the last occurrence (variant — no summary comment)
+  const newBlock: BeatBlock = { id: beatId, label, summaryComment: null, prose: content };
   parsed.blocks.splice(lastIdx + 1, 0, newBlock);
 
   return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble);
@@ -1223,6 +1283,47 @@ export interface WriteResult {
   description: string;
 }
 
+// ---------------------------------------------------------------------------
+// Beat summary comment refresh
+// ---------------------------------------------------------------------------
+
+/**
+ * Regenerate all beat-brief summary comments in a chapter's prose file
+ * from the canonical beat metadata. Returns the .md path if anything
+ * changed, null if all comments were already up to date.
+ */
+export async function refreshSummaryComments(
+  projectId: string,
+  partId: string,
+  chapterId: string
+): Promise<string | null> {
+  const meta = await getChapterMeta(projectId, partId, chapterId);
+  const mdPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.md`);
+  const markdown = await readMd(mdPath);
+  const parsed = parseBeatsGrouped(markdown);
+
+  const beatMap = new Map(meta.beats.map((b) => [b.id, b]));
+  let changed = false;
+
+  for (const block of parsed.blocks) {
+    const beatMeta = beatMap.get(block.id);
+    if (!beatMeta) continue;
+    const newComment = buildSummaryComment(beatMeta);
+    if (block.summaryComment !== newComment) {
+      block.summaryComment = newComment;
+      changed = true;
+    }
+  }
+
+  if (!changed) return null;
+
+  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble);
+  await writeMd(mdPath, updated);
+  return mdPath;
+}
+
+// ---------------------------------------------------------------------------
+
 export async function updateProject(projectId: string, patch: Partial<ProjectData>): Promise<WriteResult> {
   const current = await getProject(projectId);
   const updated = { ...current, ...patch };
@@ -1244,7 +1345,7 @@ export async function updateChapterMeta(
   partId: string,
   chapterId: string,
   patch: Partial<ChapterMeta>
-): Promise<WriteResult> {
+): Promise<WriteResult[]> {
   const current = await getChapterMeta(projectId, partId, chapterId);
   const updated = { ...current, ...patch };
   if (patch.beats) {
@@ -1259,7 +1360,20 @@ export async function updateChapterMeta(
   }
   const path = join(projectRoot(projectId), "parts", partId, `${chapterId}.meta.json`);
   await writeJson(path, updated);
-  return { path, description: `Updated ${partId}/${chapterId}.meta.json` };
+
+  const results: WriteResult[] = [
+    { path, description: `Updated ${partId}/${chapterId}.meta.json` },
+  ];
+
+  // Refresh beat-brief comments in prose when beats are patched
+  if (patch.beats) {
+    const mdPath = await refreshSummaryComments(projectId, partId, chapterId);
+    if (mdPath) {
+      results.push({ path: mdPath, description: `Refreshed beat summaries in ${chapterId}.md` });
+    }
+  }
+
+  return results;
 }
 
 export async function writeBeatProse(
@@ -1285,6 +1399,10 @@ export async function writeBeatProse(
     updated = replaceOrInsertBeatProse(markdown, beatId, content);
   }
   await writeMd(mdPath, updated);
+
+  // Refresh beat-brief comments from current meta
+  await refreshSummaryComments(projectId, partId, chapterId);
+
   return {
     path: mdPath,
     description: `${append ? "Appended variant" : "Updated"} prose for ${partId}/${chapterId}:${beatId}`,
@@ -1319,6 +1437,9 @@ export async function addBeat(
   }
   const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
   await writeJson(metaPath, meta);
+
+  // Inject initial beat-brief comment from the new beat's metadata
+  await refreshSummaryComments(projectId, partId, chapterId);
 
   return [
     { path: mdPath, description: `Added beat marker ${beatDef.id} to ${chapterId}.md` },
@@ -1911,6 +2032,11 @@ export async function markDirty(projectId: string, nodeRef: string, reason: stri
         const path = join(root, "parts", partId, `${chapterId}.meta.json`);
         await writeJson(path, meta);
         results.push({ path, description: `Marked ${partId}/${chapterId}:${beatId} dirty: ${reason}` });
+        // Refresh beat-brief comment to show dirty status
+        const mdPath = await refreshSummaryComments(projectId, partId, chapterId!);
+        if (mdPath) {
+          results.push({ path: mdPath, description: `Refreshed beat summaries in ${chapterId}.md` });
+        }
       }
     }
   }
@@ -1951,6 +2077,11 @@ export async function markClean(projectId: string, nodeRef: string): Promise<Wri
         const path = join(root, "parts", partId, `${chapterId}.meta.json`);
         await writeJson(path, meta);
         results.push({ path, description: `Marked ${partId}/${chapterId}:${beatId} clean` });
+        // Refresh beat-brief comment to show clean status
+        const mdPath = await refreshSummaryComments(projectId, partId, chapterId!);
+        if (mdPath) {
+          results.push({ path: mdPath, description: `Refreshed beat summaries in ${chapterId}.md` });
+        }
       }
     }
   }

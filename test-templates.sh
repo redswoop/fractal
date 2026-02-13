@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Template-driven canon types feature test suite
-# Runs 13 tests against the Fractal MCP server on localhost:3001
+# Fractal MCP feature test suite
+# Runs 23 tests against the Fractal MCP server on localhost:3001
 
 set -euo pipefail
 
@@ -416,6 +416,211 @@ print(len(d.get('canon_types', [])))
   else
     report 13 "apply_template idempotent -- still 5 canon types after re-apply" "false" "count=$CANON_COUNT (expected 5)"
   fi
+fi
+
+# =========================================================================
+# Test 14: add_beat injects beat-brief comment into .md
+# =========================================================================
+echo "--- Test 14: add_beat injects beat-brief into prose file ---"
+mcp_call "add_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b01","label":"The guild arrives","summary":"The Guild marches into town at dawn. Banners flying, armor gleaming. The townsfolk watch from shuttered windows.","status":"planned","dirty_reason":null,"characters":["the-guild"],"depends_on":[],"depended_by":[]}}' > /dev/null
+
+T14_PASS=$(python3 -c "
+import sys
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+has_marker = '<!-- beat:b01 |' in md
+has_brief = '<!-- beat-brief:b01 [PLANNED]' in md
+has_summary = 'Guild marches into town' in md
+ok = has_marker and has_brief and has_summary
+print('true' if ok else 'false|marker=' + str(has_marker) + ' brief=' + str(has_brief) + ' summary=' + str(has_summary))
+")
+if [ "$(echo "$T14_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 14 "add_beat injects beat-brief [PLANNED] into .md file" "true"
+else
+  report 14 "add_beat injects beat-brief [PLANNED] into .md file" "false" "$(echo "$T14_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 15: write_beat_prose preserves beat-brief, getBeatProse is clean
+# =========================================================================
+echo "--- Test 15: write prose, verify .md has brief, beat read is clean ---"
+mcp_call "write_beat_prose" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b01","content":"The dust rose before the column did. Marguerite saw it first."}' > /dev/null
+
+# Check the .md on disk still has beat-brief
+T15A_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+has_brief = 'beat-brief:b01' in md
+has_prose = 'dust rose before the column' in md
+print('true' if (has_brief and has_prose) else 'false|brief=' + str(has_brief) + ' prose=' + str(has_prose))
+")
+
+# Check getBeatProse returns clean prose (no beat-brief)
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"beats":["part-01/chapter-01:b01"]}}')
+TEXT=$(extract_text "$RESULT")
+T15B_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+prose = d.get('beats', {}).get('part-01/chapter-01:b01', {}).get('prose', '')
+clean = 'beat-brief' not in prose
+has_content = 'dust rose' in prose
+print('true' if (clean and has_content) else 'false|clean=' + str(clean) + ' content=' + str(has_content))
+" <<< "$TEXT")
+
+if [ "$(echo "$T15A_PASS" | cut -d'|' -f1)" = "true" ] && [ "$(echo "$T15B_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 15 "write_beat_prose: .md has brief, getBeatProse is clean" "true"
+else
+  report 15 "write_beat_prose: .md has brief, getBeatProse is clean" "false" "disk=$(echo "$T15A_PASS" | cut -d'|' -f2-) api=$(echo "$T15B_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 16: update_chapter_meta refreshes beat-brief status
+# =========================================================================
+echo "--- Test 16: update_chapter_meta refreshes beat-brief status ---"
+mcp_call "update_chapter_meta" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","patch":{"beats":[{"id":"b01","status":"written"}]}}' > /dev/null
+
+T16_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+has_written = '[WRITTEN]' in md
+no_planned = '[PLANNED]' not in md
+print('true' if (has_written and no_planned) else 'false|written=' + str(has_written) + ' no_planned=' + str(no_planned))
+")
+if [ "$(echo "$T16_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 16 "update_chapter_meta refreshes beat-brief to [WRITTEN]" "true"
+else
+  report 16 "update_chapter_meta refreshes beat-brief to [WRITTEN]" "false" "$(echo "$T16_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 17: mark_node dirty updates beat-brief
+# =========================================================================
+echo "--- Test 17: mark_node dirty updates beat-brief ---"
+mcp_call "mark_node" '{"project":"_fractal-test","node_ref":"part-01/chapter-01:b01","status":"dirty","reason":"canon change: the-guild backstory revised"}' > /dev/null
+
+T17_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+has_dirty = '[DIRTY: canon change: the-guild backstory revised]' in md
+no_written = '[WRITTEN]' not in md
+print('true' if (has_dirty and no_written) else 'false|dirty=' + str(has_dirty) + ' no_written=' + str(no_written))
+")
+if [ "$(echo "$T17_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 17 "mark_node dirty updates beat-brief to [DIRTY: reason]" "true"
+else
+  report 17 "mark_node dirty updates beat-brief to [DIRTY: reason]" "false" "$(echo "$T17_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 18: edit_beat_prose preserves beat-brief
+# =========================================================================
+echo "--- Test 18: edit_beat_prose preserves beat-brief ---"
+mcp_call "edit_beat_prose" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b01","edits":[{"old_str":"Marguerite saw it first","new_str":"Marguerite noticed it first"}]}' > /dev/null
+
+T18_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+has_brief = 'beat-brief:b01' in md
+has_edit = 'noticed it first' in md
+print('true' if (has_brief and has_edit) else 'false|brief=' + str(has_brief) + ' edit=' + str(has_edit))
+")
+if [ "$(echo "$T18_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 18 "edit_beat_prose preserves beat-brief comment" "true"
+else
+  report 18 "edit_beat_prose preserves beat-brief comment" "false" "$(echo "$T18_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 19: add second beat, reorder — briefs travel with beats
+# =========================================================================
+echo "--- Test 19: reorder_beats carries beat-brief comments ---"
+mcp_call "add_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b02","label":"The standoff","summary":"Unit 7 stands between the Guild and the bakery door. She does not move.","status":"planned","dirty_reason":null,"characters":["unit-7","the-guild"],"depends_on":[],"depended_by":[]}}' > /dev/null
+
+mcp_call "reorder_beats" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_order":["b02","b01"]}' > /dev/null
+
+T19_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+b02_marker = md.find('beat:b02')
+b01_marker = md.find('beat:b01')
+b02_brief = md.find('beat-brief:b02')
+b01_brief = md.find('beat-brief:b01')
+order_ok = 0 < b02_marker < b01_marker
+briefs_present = b02_brief > 0 and b01_brief > 0
+briefs_ordered = b02_brief < b01_brief
+ok = order_ok and briefs_present and briefs_ordered
+print('true' if ok else 'false|order=' + str(order_ok) + ' briefs=' + str(briefs_present) + ' brief_order=' + str(briefs_ordered))
+")
+if [ "$(echo "$T19_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 19 "reorder_beats: beat-brief comments travel with their blocks" "true"
+else
+  report 19 "reorder_beats: beat-brief comments travel with their blocks" "false" "$(echo "$T19_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 20: refresh_summaries tool works
+# =========================================================================
+echo "--- Test 20: refresh_summaries tool ---"
+RESULT=$(mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01"}')
+TEXT=$(extract_text "$RESULT")
+T20_PASS=$(python3 -c "
+import sys
+text = sys.stdin.read()
+ok = 'up to date' in text or 'Refreshed' in text
+print('true' if ok else 'false|' + repr(text[:200]))
+" <<< "$TEXT")
+if [ "$(echo "$T20_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 20 "refresh_summaries tool responds correctly" "true"
+else
+  report 20 "refresh_summaries tool responds correctly" "false" "$(echo "$T20_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 21: idempotency — refresh twice produces identical .md
+# =========================================================================
+echo "--- Test 21: beat-brief refresh is idempotent ---"
+MD_BEFORE=$(cat "$TEST_DIR/parts/part-01/chapter-01.md")
+mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01"}' > /dev/null
+MD_AFTER=$(cat "$TEST_DIR/parts/part-01/chapter-01.md")
+if [ "$MD_BEFORE" = "$MD_AFTER" ]; then
+  report 21 "refresh_summaries is idempotent — .md unchanged on second run" "true"
+else
+  report 21 "refresh_summaries is idempotent — .md unchanged on second run" "false" "files differ"
+fi
+
+# =========================================================================
+# Test 22: summary truncation for long summaries
+# =========================================================================
+echo "--- Test 22: long summary gets truncated in beat-brief ---"
+mcp_call "add_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b03","label":"The long speech","summary":"This is a very long beat summary that goes on and on about many things. It describes in great detail everything that happens in this particular beat of the story. The characters do things, say things, and experience things. There are descriptions of the setting, the mood, the weather, and the general atmosphere. This continues for quite a while because we want to test that the truncation logic works properly when the summary exceeds the maximum length allowed.","status":"planned","dirty_reason":null,"characters":[],"depends_on":[],"depended_by":[]}}' > /dev/null
+
+T22_PASS=$(python3 -c "
+import re
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+m = re.search(r'<!-- beat-brief:b03 \[PLANNED\] (.+?) -->', md)
+if not m:
+    print('false|no beat-brief:b03 found')
+else:
+    text = m.group(1)
+    ok = len(text) <= 300 and text.startswith('This is a very long')
+    print('true' if ok else 'false|len=' + str(len(text)) + ' text=' + repr(text[:80]))
+")
+if [ "$(echo "$T22_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 22 "long summary is truncated in beat-brief (<=300 chars)" "true"
+else
+  report 22 "long summary is truncated in beat-brief (<=300 chars)" "false" "$(echo "$T22_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 23: remove_beat also removes its beat-brief
+# =========================================================================
+echo "--- Test 23: remove_beat removes beat-brief ---"
+mcp_call "remove_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b03"}' > /dev/null
+
+T23_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+no_marker = 'beat:b03' not in md
+no_brief = 'beat-brief:b03' not in md
+print('true' if (no_marker and no_brief) else 'false|marker_gone=' + str(no_marker) + ' brief_gone=' + str(no_brief))
+")
+if [ "$(echo "$T23_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 23 "remove_beat removes both beat marker and beat-brief" "true"
+else
+  report 23 "remove_beat removes both beat marker and beat-brief" "false" "$(echo "$T23_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================

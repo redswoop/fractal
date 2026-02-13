@@ -258,6 +258,10 @@ async function createMcpServer(): Promise<McpServer> {
     "Use get_context as the primary read tool — it returns any combination of project data in one call.",
     "All tools except list_projects and list_templates require a 'project' parameter.",
     "",
+    "Beat-brief comments: Each beat marker in a chapter .md has a summary comment (<!-- beat-brief:ID [STATUS] ... -->) " +
+    "showing the beat's status and truncated summary. These are auto-managed — refreshed on writes to beats or meta. " +
+    "For chapters missing these comments (created before this feature), call refresh_summaries once per chapter at session start.",
+    "",
     "Current projects:",
     projectLines,
   ].join("\n");
@@ -1111,6 +1115,41 @@ async function createMcpServer(): Promise<McpServer> {
     }
   });
 
+  // -----------------------------------------------------------------------
+  // Maintenance tools
+  // -----------------------------------------------------------------------
+
+  server.registerTool("refresh_summaries", {
+    title: "Refresh Beat Summaries",
+    description:
+      "Regenerate all beat-brief summary comments in a chapter's prose file from the meta. " +
+      "Use for migration (existing chapters without comments) or after external edits.",
+    inputSchema: {
+      project: projectParam,
+      part_id: z.string().describe("Part identifier"),
+      chapter_id: z.string().describe("Chapter identifier"),
+    },
+  }, async ({ project, part_id, chapter_id }) => {
+    logToolCall("refresh_summaries", { project, part_id, chapter_id });
+    try {
+      const root = store.projectRoot(project);
+      const mdPath = await store.refreshSummaryComments(project, part_id, chapter_id);
+      if (!mdPath) {
+        return textResult("All summary comments are already up to date.");
+      }
+      const relPath = mdPath.startsWith(root) ? mdPath.slice(root.length + 1) : mdPath;
+      try {
+        await autoCommit(root, [relPath], `Refreshed beat summaries in ${part_id}/${chapter_id}`);
+      } catch (err) {
+        console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
+      }
+      return textResult(`Refreshed beat summary comments in ${part_id}/${chapter_id}.md`);
+    } catch (err) {
+      logToolError("refresh_summaries", err);
+      throw err;
+    }
+  });
+
   return server;
 }
 
@@ -1257,7 +1296,7 @@ app.get("/help", async () => {
       write: {
         update_project: "Patch top-level project metadata.",
         update_part: "Patch a part's metadata (title, summary, arc, status, chapters).",
-        update_chapter_meta: "Patch chapter metadata — beat summaries, status, dependencies.",
+        update_chapter_meta: "Patch chapter metadata — beat summaries, status, deps. Also refreshes beat-brief comments in prose.",
         write_beat_prose: "Insert or replace prose for a beat. With append=true, adds a variant block.",
         edit_beat_prose: "Surgical str_replace within a beat's prose. Atomic, ordered edits.",
         add_beat: "Add a new beat to a chapter (markdown marker + meta entry).",
@@ -1275,6 +1314,9 @@ app.get("/help", async () => {
       },
       session: {
         session_summary: "Create a session-level git commit summarizing the working session.",
+      },
+      maintenance: {
+        refresh_summaries: "Regenerate beat-brief summary comments in a chapter's prose file from the meta.",
       },
     },
     architecture: {
