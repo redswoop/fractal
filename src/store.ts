@@ -135,6 +135,55 @@ function buildSummaryComment(beat: BeatMeta): string | null {
   return `<!-- beat-brief:${beat.id} [${statusTag}] ${text} -->`;
 }
 
+// ---------------------------------------------------------------------------
+// Chapter-level summary comment helpers
+// ---------------------------------------------------------------------------
+
+const CHAPTER_BRIEF_REGEX = /^<!--\s*chapter-brief\s*\[([^\]]+)\]\s*(.*?)\s*-->$/;
+
+function buildChapterBriefComment(meta: ChapterMeta): string | null {
+  if (!meta.summary) return null;
+  const statusTag = meta.status === "dirty" && meta.dirty_reason
+    ? `DIRTY: ${meta.dirty_reason}`
+    : meta.status.toUpperCase();
+  const text = truncateSummary(meta.summary);
+  return `<!-- chapter-brief [${statusTag}] ${text} -->`;
+}
+
+/**
+ * Strip a chapter-brief comment from the preamble (text before any beat marker).
+ * Only scans preamble lines — never looks past them.
+ */
+function stripChapterBrief(preamble: string): { brief: string | null; preamble: string } {
+  const lines = preamble.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i]!.trim();
+    if (CHAPTER_BRIEF_REGEX.test(trimmed)) {
+      const brief = trimmed;
+      const remaining = [...lines.slice(0, i), ...lines.slice(i + 1)].join("\n");
+      return { brief, preamble: remaining };
+    }
+  }
+  return { brief: null, preamble };
+}
+
+/**
+ * Inject a chapter-brief comment into the preamble, immediately after the
+ * first `# ` heading line. If brief is null/empty, return preamble unchanged.
+ */
+function injectChapterBrief(preamble: string, brief: string | null): string {
+  if (!brief) return preamble;
+  const lines = preamble.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.startsWith("# ")) {
+      lines.splice(i + 1, 0, brief);
+      return lines.join("\n");
+    }
+  }
+  // No heading found — prepend
+  return brief + "\n" + preamble;
+}
+
 /**
  * Strip a beat-brief summary comment from raw prose text.
  * Scans the first few lines (stopping at the first real prose line)
@@ -207,7 +256,7 @@ function replaceOrInsertBeatProse(
     throw new Error(`Beat marker for ${beatId} not found in chapter file`);
   }
   parsed.blocks[idx] = { ...parsed.blocks[idx]!, prose: newProse };
-  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble);
+  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterBrief);
 }
 
 function addBeatMarker(
@@ -257,6 +306,7 @@ interface BeatBlock {
 
 function parseBeatsGrouped(markdown: string): {
   preamble: string;
+  chapterBrief: string | null;
   blocks: BeatBlock[];
   postamble: string;
 } {
@@ -274,10 +324,12 @@ function parseBeatsGrouped(markdown: string): {
   }
 
   if (matches.length === 0) {
-    return { preamble: markdown, blocks: [], postamble: "" };
+    const { brief, preamble: cleanPreamble } = stripChapterBrief(markdown);
+    return { preamble: cleanPreamble, chapterBrief: brief, blocks: [], postamble: "" };
   }
 
-  const preamble = markdown.slice(0, matches[0]!.index);
+  const rawPreamble = markdown.slice(0, matches[0]!.index);
+  const { brief: chapterBrief, preamble } = stripChapterBrief(rawPreamble);
 
   // Find where postamble starts: the <!-- /chapter --> marker after the last beat
   const lastMatch = matches[matches.length - 1]!;
@@ -294,15 +346,16 @@ function parseBeatsGrouped(markdown: string): {
     blocks.push({ id: current.id, label: current.label, summaryComment: comment, prose });
   }
 
-  return { preamble, blocks, postamble };
+  return { preamble, chapterBrief, blocks, postamble };
 }
 
 function reassembleChapter(
   preamble: string,
   blocks: BeatBlock[],
-  postamble: string
+  postamble: string,
+  chapterBrief?: string | null
 ): string {
-  let result = preamble;
+  let result = injectChapterBrief(preamble, chapterBrief ?? null);
   // Ensure preamble ends with a newline before first beat
   if (result.length > 0 && !result.endsWith("\n")) {
     result += "\n";
@@ -341,7 +394,7 @@ function removeAllBeatMarkers(
     }
   }
 
-  const updated = reassembleChapter(parsed.preamble, kept, parsed.postamble);
+  const updated = reassembleChapter(parsed.preamble, kept, parsed.postamble, parsed.chapterBrief);
   return { updated, removedBlocks };
 }
 
@@ -369,7 +422,7 @@ function appendBeatBlock(
   const newBlock: BeatBlock = { id: beatId, label, summaryComment: null, prose: content };
   parsed.blocks.splice(lastIdx + 1, 0, newBlock);
 
-  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble);
+  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterBrief);
 }
 
 // ---------------------------------------------------------------------------
@@ -610,11 +663,7 @@ export async function createChapter(
     throw new Error(`Part "${partId}" does not exist. Create it first with create_part.`);
   }
 
-  // Create the chapter prose file with a title and closing marker
-  const mdPath = join(partDir, `${chapterId}.md`);
-  await writeMd(mdPath, `# ${title}\n\n<!-- /chapter -->\n`);
-
-  // Create the chapter meta file
+  // Create the chapter meta file first so we can derive the chapter-brief
   const metaPath = join(partDir, `${chapterId}.meta.json`);
   const meta: ChapterMeta = {
     title,
@@ -626,6 +675,14 @@ export async function createChapter(
     beats: [],
   };
   await writeJson(metaPath, meta);
+
+  // Create the chapter prose file with a title, optional chapter-brief, and closing marker
+  const mdPath = join(partDir, `${chapterId}.md`);
+  const chapterBrief = buildChapterBriefComment(meta);
+  const mdContent = chapterBrief
+    ? `# ${title}\n${chapterBrief}\n\n<!-- /chapter -->\n`
+    : `# ${title}\n\n<!-- /chapter -->\n`;
+  await writeMd(mdPath, mdContent);
 
   // Add to part.json chapters list if not already there
   const part = await readJson<PartData>(join(partDir, "part.json"));
@@ -1288,9 +1345,9 @@ export interface WriteResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Regenerate all beat-brief summary comments in a chapter's prose file
- * from the canonical beat metadata. Returns the .md path if anything
- * changed, null if all comments were already up to date.
+ * Regenerate all summary comments (chapter-brief + beat-briefs) in a
+ * chapter's prose file from the canonical metadata. Returns the .md
+ * path if anything changed, null if all comments were already up to date.
  */
 export async function refreshSummaryComments(
   projectId: string,
@@ -1302,9 +1359,17 @@ export async function refreshSummaryComments(
   const markdown = await readMd(mdPath);
   const parsed = parseBeatsGrouped(markdown);
 
-  const beatMap = new Map(meta.beats.map((b) => [b.id, b]));
   let changed = false;
 
+  // Chapter-brief
+  const newChapterBrief = buildChapterBriefComment(meta);
+  if (parsed.chapterBrief !== newChapterBrief) {
+    parsed.chapterBrief = newChapterBrief;
+    changed = true;
+  }
+
+  // Beat-briefs
+  const beatMap = new Map(meta.beats.map((b) => [b.id, b]));
   for (const block of parsed.blocks) {
     const beatMeta = beatMap.get(block.id);
     if (!beatMeta) continue;
@@ -1317,7 +1382,7 @@ export async function refreshSummaryComments(
 
   if (!changed) return null;
 
-  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble);
+  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterBrief);
   await writeMd(mdPath, updated);
   return mdPath;
 }
@@ -1365,12 +1430,12 @@ export async function updateChapterMeta(
     { path, description: `Updated ${partId}/${chapterId}.meta.json` },
   ];
 
-  // Refresh beat-brief comments in prose when beats are patched
-  if (patch.beats) {
-    const mdPath = await refreshSummaryComments(projectId, partId, chapterId);
-    if (mdPath) {
-      results.push({ path: mdPath, description: `Refreshed beat summaries in ${chapterId}.md` });
-    }
+  // Refresh summary comments (chapter-brief + beat-briefs) in prose.
+  // Always refresh — any patch to summary, status, dirty_reason, or beats
+  // could affect either chapter-brief or beat-briefs.
+  const mdPath = await refreshSummaryComments(projectId, partId, chapterId);
+  if (mdPath) {
+    results.push({ path: mdPath, description: `Refreshed summaries in ${chapterId}.md` });
   }
 
   return results;
@@ -1579,7 +1644,7 @@ export async function reorderBeats(
     if (group) newBlocks.push(...group);
   }
 
-  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble);
+  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble, parsed.chapterBrief);
   await writeMd(mdPath, updated);
   results.push({ path: mdPath, description: `Reordered beat markers in ${partId}/${chapterId}.md` });
 
@@ -1678,7 +1743,7 @@ export async function selectBeatVariant(
     }
   }
 
-  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble);
+  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble, parsed.chapterBrief);
   await writeMd(mdPath, updated);
   results.push({ path: mdPath, description: `Selected variant ${keepIndex} for ${beatId} in ${chapterId}.md` });
 
@@ -1989,7 +2054,7 @@ export async function editBeatProse(
 
   // All edits passed — update the block and write to disk
   parsed.blocks[target.idx]! = { ...target.block, prose: text };
-  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble);
+  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterBrief);
   await writeMd(mdPath, updated);
 
   return {

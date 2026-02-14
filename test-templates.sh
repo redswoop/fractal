@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Fractal MCP feature test suite
-# Runs 23 tests against the Fractal MCP server on localhost:3001
+# Runs 30 tests against the Fractal MCP server on localhost:3001
 
 set -euo pipefail
 
 BASE_URL="http://localhost:3001/mcp"
-TEST_DIR="/workspace/fractal/test-projects/_fractal-test"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TEST_DIR="${SCRIPT_DIR}/test-projects/_fractal-test"
 PASS_COUNT=0
 FAIL_COUNT=0
 CALL_ID=0
@@ -624,9 +625,142 @@ else
 fi
 
 # =========================================================================
+# Test 24: create_chapter with summary → chapter-brief appears
+# =========================================================================
+echo "--- Test 24: create_chapter with summary injects chapter-brief ---"
+mcp_call "create_chapter" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","title":"The Market","summary":"Unit 7 visits the morning market and discovers a coded message."}' > /dev/null
+
+T24_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+has_heading = '# The Market' in md
+has_brief = '<!-- chapter-brief [PLANNING]' in md
+has_summary = 'coded message' in md
+has_close = '<!-- /chapter -->' in md
+ok = has_heading and has_brief and has_summary and has_close
+print('true' if ok else 'false|heading=' + str(has_heading) + ' brief=' + str(has_brief) + ' summary=' + str(has_summary) + ' close=' + str(has_close))
+")
+if [ "$(echo "$T24_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 24 "create_chapter with summary injects chapter-brief [PLANNING]" "true"
+else
+  report 24 "create_chapter with summary injects chapter-brief [PLANNING]" "false" "$(echo "$T24_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 25: create_chapter without summary → no chapter-brief
+# =========================================================================
+echo "--- Test 25: create_chapter without summary → no chapter-brief ---"
+T25_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+no_brief = 'chapter-brief' not in md
+print('true' if no_brief else 'false|chapter-brief found in chapter without summary')
+")
+if [ "$(echo "$T25_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 25 "chapter without summary has no chapter-brief" "true"
+else
+  report 25 "chapter without summary has no chapter-brief" "false" "$(echo "$T25_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 26: chapter-brief coexists with beat-briefs
+# =========================================================================
+echo "--- Test 26: chapter-brief coexists with beat-briefs ---"
+mcp_call "add_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","beat":{"id":"b01","label":"Arriving at market","summary":"Unit 7 enters through the east gate. Vendors call out prices.","status":"planned","dirty_reason":null,"characters":["unit-7"],"depends_on":[],"depended_by":[]}}' > /dev/null
+
+T26_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+has_chapter_brief = '<!-- chapter-brief [PLANNING]' in md
+has_beat_brief = '<!-- beat-brief:b01 [PLANNED]' in md
+has_beat_marker = '<!-- beat:b01 |' in md
+# chapter-brief should come before beat markers
+cb_pos = md.find('chapter-brief')
+bm_pos = md.find('beat:b01')
+order_ok = cb_pos < bm_pos
+ok = has_chapter_brief and has_beat_brief and has_beat_marker and order_ok
+print('true' if ok else 'false|ch_brief=' + str(has_chapter_brief) + ' beat_brief=' + str(has_beat_brief) + ' order=' + str(order_ok))
+")
+if [ "$(echo "$T26_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 26 "chapter-brief coexists with beat-briefs, correct order" "true"
+else
+  report 26 "chapter-brief coexists with beat-briefs, correct order" "false" "$(echo "$T26_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 27: update_chapter_meta summary → chapter-brief injected
+# =========================================================================
+echo "--- Test 27: update_chapter_meta with summary updates chapter-brief ---"
+mcp_call "update_chapter_meta" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"summary":"Unit 7 visits the morning market and finds a hidden cipher."}}' > /dev/null
+
+T27_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+has_new_summary = 'hidden cipher' in md
+no_old_summary = 'coded message' not in md
+has_brief = '<!-- chapter-brief [PLANNING]' in md
+ok = has_new_summary and no_old_summary and has_brief
+print('true' if ok else 'false|new=' + str(has_new_summary) + ' no_old=' + str(no_old_summary) + ' brief=' + str(has_brief))
+")
+if [ "$(echo "$T27_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 27 "update_chapter_meta summary refreshes chapter-brief" "true"
+else
+  report 27 "update_chapter_meta summary refreshes chapter-brief" "false" "$(echo "$T27_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 28: status change updates chapter-brief status tag
+# =========================================================================
+echo "--- Test 28: status change updates chapter-brief tag ---"
+mcp_call "update_chapter_meta" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"status":"dirty","dirty_reason":"canon revision"}}' > /dev/null
+
+T28_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+has_dirty = '[DIRTY: canon revision]' in md
+no_planning = '<!-- chapter-brief [PLANNING]' not in md
+ok = has_dirty and no_planning
+print('true' if ok else 'false|dirty=' + str(has_dirty) + ' no_planning=' + str(no_planning))
+")
+if [ "$(echo "$T28_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 28 "chapter-brief status updates to [DIRTY: reason]" "true"
+else
+  report 28 "chapter-brief status updates to [DIRTY: reason]" "false" "$(echo "$T28_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 29: refresh_summaries updates both chapter-brief and beat-briefs
+# =========================================================================
+echo "--- Test 29: refresh_summaries covers chapter-brief + beat-briefs ---"
+mcp_call "update_chapter_meta" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"status":"written","dirty_reason":null}}' > /dev/null
+RESULT=$(mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02"}')
+TEXT=$(extract_text "$RESULT")
+
+T29_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+has_ch = '<!-- chapter-brief [WRITTEN]' in md
+has_beat = 'beat-brief:b01' in md
+ok = has_ch and has_beat
+print('true' if ok else 'false|ch_brief=' + str(has_ch) + ' beat_brief=' + str(has_beat))
+")
+if [ "$(echo "$T29_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 29 "refresh_summaries covers chapter-brief and beat-briefs" "true"
+else
+  report 29 "refresh_summaries covers chapter-brief and beat-briefs" "false" "$(echo "$T29_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 30: chapter-brief idempotency
+# =========================================================================
+echo "--- Test 30: chapter-brief refresh is idempotent ---"
+MD_BEFORE2=$(cat "$TEST_DIR/parts/part-01/chapter-02.md")
+mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02"}' > /dev/null
+MD_AFTER2=$(cat "$TEST_DIR/parts/part-01/chapter-02.md")
+if [ "$MD_BEFORE2" = "$MD_AFTER2" ]; then
+  report 30 "chapter-brief refresh is idempotent" "true"
+else
+  report 30 "chapter-brief refresh is idempotent" "false" "files differ after second refresh"
+fi
+
+# =========================================================================
 # Cleanup
 # =========================================================================
-rm -f /workspace/fractal/templates/_test-custom.json 2>/dev/null
+rm -f "${SCRIPT_DIR}/templates/_test-custom.json" 2>/dev/null
 
 # =========================================================================
 # Summary

@@ -258,8 +258,9 @@ async function createMcpServer(): Promise<McpServer> {
     "Use get_context as the primary read tool — it returns any combination of project data in one call.",
     "All tools except list_projects and list_templates require a 'project' parameter.",
     "",
-    "Beat-brief comments: Each beat marker in a chapter .md has a summary comment (<!-- beat-brief:ID [STATUS] ... -->) " +
-    "showing the beat's status and truncated summary. These are auto-managed — refreshed on writes to beats or meta. " +
+    "Summary comments: Each chapter .md has a chapter-brief comment (<!-- chapter-brief [STATUS] ... -->) after the heading " +
+    "showing the chapter's status and truncated summary, plus beat-brief comments (<!-- beat-brief:ID [STATUS] ... -->) for each beat. " +
+    "These are auto-managed — refreshed on writes to beats or meta. " +
     "For chapters missing these comments (created before this feature), call refresh_summaries once per chapter at session start.",
     "",
     "Current projects:",
@@ -630,6 +631,7 @@ async function createMcpServer(): Promise<McpServer> {
         location: z.string().optional().describe("Location id"),
         timeline_position: z.string().optional().describe("e.g. '1996-09-14'"),
         status: z.string().optional().describe("'planning', 'clean', 'dirty', 'conflict'"),
+        dirty_reason: z.string().nullable().optional().describe("Why this chapter needs review (set with status='dirty', null to clear)"),
         beats: z.array(z.object({
           id: z.string().describe("Beat identifier, e.g. 'b01'"),
           label: z.string().optional().describe("Short beat label"),
@@ -1120,9 +1122,9 @@ async function createMcpServer(): Promise<McpServer> {
   // -----------------------------------------------------------------------
 
   server.registerTool("refresh_summaries", {
-    title: "Refresh Beat Summaries",
+    title: "Refresh Summary Comments",
     description:
-      "Regenerate all beat-brief summary comments in a chapter's prose file from the meta. " +
+      "Regenerate all summary comments (chapter-brief + beat-briefs) in a chapter's prose file from the meta. " +
       "Use for migration (existing chapters without comments) or after external edits.",
     inputSchema: {
       project: projectParam,
@@ -1296,7 +1298,7 @@ app.get("/help", async () => {
       write: {
         update_project: "Patch top-level project metadata.",
         update_part: "Patch a part's metadata (title, summary, arc, status, chapters).",
-        update_chapter_meta: "Patch chapter metadata — beat summaries, status, deps. Also refreshes beat-brief comments in prose.",
+        update_chapter_meta: "Patch chapter metadata — beat summaries, status, deps. Also refreshes summary comments (chapter-brief + beat-briefs) in prose.",
         write_beat_prose: "Insert or replace prose for a beat. With append=true, adds a variant block.",
         edit_beat_prose: "Surgical str_replace within a beat's prose. Atomic, ordered edits.",
         add_beat: "Add a new beat to a chapter (markdown marker + meta entry).",
@@ -1316,7 +1318,7 @@ app.get("/help", async () => {
         session_summary: "Create a session-level git commit summarizing the working session.",
       },
       maintenance: {
-        refresh_summaries: "Regenerate beat-brief summary comments in a chapter's prose file from the meta.",
+        refresh_summaries: "Regenerate all summary comments (chapter-brief + beat-briefs) in a chapter's prose file from the meta.",
       },
     },
     architecture: {
