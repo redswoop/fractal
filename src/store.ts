@@ -9,7 +9,7 @@
  */
 
 import { readFile, writeFile, readdir, rename, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -24,6 +24,37 @@ const PROJECTS_ROOT = resolve(
 const TEST_PROJECTS_ROOT = resolve(
   process.env["FRACTAL_TEST_PROJECTS_ROOT"] ?? join(import.meta.dirname, "..", "test-projects")
 );
+
+// ---------------------------------------------------------------------------
+// Ignore patterns — loaded once at startup from .fractalignore
+// ---------------------------------------------------------------------------
+
+const PACKAGE_ROOT = resolve(import.meta.dirname, "..");
+
+function loadIgnorePatterns(): Set<string> {
+  const userPath = join(PROJECTS_ROOT, "fractalignore");
+  const defaultPath = join(PACKAGE_ROOT, "fractalignore");
+  const filePath = existsSync(userPath) ? userPath : existsSync(defaultPath) ? defaultPath : null;
+  if (!filePath) return new Set();
+  const content = readFileSync(filePath, "utf-8");
+  const patterns = new Set<string>();
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith("#")) patterns.add(trimmed);
+  }
+  console.log(`[fractal] Loaded ${patterns.size} ignore patterns from ${filePath}`);
+  return patterns;
+}
+
+const IGNORE_SET = loadIgnorePatterns();
+
+function shouldIgnore(name: string): boolean {
+  return IGNORE_SET.has(name);
+}
+
+export function getIgnorePatterns(): string[] {
+  return [...IGNORE_SET];
+}
 
 function isTestProject(projectId: string): boolean {
   return projectId.startsWith("_");
@@ -458,6 +489,7 @@ export async function listTemplates(): Promise<{ id: string; name: string; descr
   const entries = await readdir(TEMPLATES_ROOT);
   const templates: { id: string; name: string; description: string }[] = [];
   for (const entry of entries) {
+    if (shouldIgnore(entry)) continue;
     if (!entry.endsWith(".json")) continue;
     try {
       const data = await readJson<ProjectTemplate>(join(TEMPLATES_ROOT, entry));
@@ -549,7 +581,7 @@ export async function listProjects(): Promise<{ id: string; title: string; statu
     if (!existsSync(root)) continue;
     const entries = await readdir(root, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      if (!entry.isDirectory() || entry.name.startsWith(".") || shouldIgnore(entry.name)) continue;
       const projectJsonPath = join(root, entry.name, "project.json");
       if (!existsSync(projectJsonPath)) continue;
       try {
@@ -792,7 +824,7 @@ export async function listCanon(projectId: string, type: string): Promise<string
   if (!existsSync(dir)) return [];
   const files = await readdir(dir);
   return files
-    .filter((f) => f.endsWith(".md"))
+    .filter((f) => !shouldIgnore(f) && f.endsWith(".md"))
     .map((f) => f.replace(/\.md$/, ""));
 }
 
@@ -805,7 +837,7 @@ export async function listCanonTypes(projectId: string): Promise<string[]> {
   if (!existsSync(canonDir)) return [];
   const entries = await readdir(canonDir, { withFileTypes: true });
   return entries
-    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+    .filter((e) => e.isDirectory() && !e.name.startsWith(".") && !shouldIgnore(e.name))
     .map((e) => e.name)
     .sort();
 }
@@ -893,6 +925,7 @@ export async function search(
     if (!existsSync(dir)) return;
     const entries = await readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
+      if (shouldIgnore(entry.name)) continue;
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
         await searchDir(fullPath, `${prefix}${entry.name}/`);

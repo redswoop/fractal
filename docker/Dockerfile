@@ -22,6 +22,7 @@ RUN apt-get update && \
 COPY --from=fractal-build /build/dist /opt/fractal/dist
 COPY --from=fractal-build /build/node_modules /opt/fractal/node_modules
 COPY --from=fractal-build /build/package.json /opt/fractal/package.json
+COPY --from=fractal-build /build/fractalignore /opt/fractal/fractalignore
 COPY --from=fractal-build /build/templates /opt/fractal/templates
 
 # s6 service: run Fractal as a supervised daemon

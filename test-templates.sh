@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fractal MCP feature test suite
-# Runs 30 tests against the Fractal MCP server on localhost:3001
+# Runs 33 tests against the Fractal MCP server on localhost:3001
 
 set -euo pipefail
 
@@ -755,6 +755,81 @@ if [ "$MD_BEFORE2" = "$MD_AFTER2" ]; then
   report 30 "chapter-brief refresh is idempotent" "true"
 else
   report 30 "chapter-brief refresh is idempotent" "false" "files differ after second refresh"
+fi
+
+# =========================================================================
+# Test 31: @eaDir project directory invisible to list_projects
+# =========================================================================
+echo "--- Test 31: @eaDir invisible to list_projects ---"
+mkdir -p "${SCRIPT_DIR}/test-projects/@eaDir"
+cat > "${SCRIPT_DIR}/test-projects/@eaDir/project.json" <<'EADIR_JSON'
+{"title":"Junk NAS dir","subtitle":null,"logline":"","status":"planning","themes":[],"parts":[]}
+EADIR_JSON
+
+RESULT=$(mcp_call "list_projects" '{}')
+TEXT=$(extract_text "$RESULT")
+T31_PASS=$(python3 -c "
+import json, sys
+projects = json.loads(sys.stdin.read())
+ids = [p['id'] for p in projects]
+ok = '@eaDir' not in ids
+print('true' if ok else 'false|@eaDir found in: ' + str(ids))
+" <<< "$TEXT")
+rm -rf "${SCRIPT_DIR}/test-projects/@eaDir"
+
+if [ "$(echo "$T31_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 31 "@eaDir project dir invisible to list_projects" "true"
+else
+  report 31 "@eaDir project dir invisible to list_projects" "false" "$(echo "$T31_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 32: @eaDir inside parts/ invisible to search
+# =========================================================================
+echo "--- Test 32: @eaDir inside parts/ invisible to search ---"
+mkdir -p "$TEST_DIR/parts/@eaDir"
+cat > "$TEST_DIR/parts/@eaDir/junk.md" <<'EADIR_MD'
+# Secret NAS metadata
+This contains the word guild for search matching.
+EADIR_MD
+
+RESULT=$(mcp_call "search" '{"project":"_fractal-test","query":"guild"}')
+TEXT=$(extract_text "$RESULT")
+T32_PASS=$(python3 -c "
+import sys
+text = sys.stdin.read()
+ok = '@eaDir' not in text
+print('true' if ok else 'false|@eaDir found in search results: ' + repr(text[:300]))
+" <<< "$TEXT")
+rm -rf "$TEST_DIR/parts/@eaDir"
+
+if [ "$(echo "$T32_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 32 "@eaDir inside parts/ invisible to search" "true"
+else
+  report 32 "@eaDir inside parts/ invisible to search" "false" "$(echo "$T32_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 33: .DS_Store invisible to listCanon
+# =========================================================================
+echo "--- Test 33: .DS_Store invisible to listCanon ---"
+touch "$TEST_DIR/canon/characters/.DS_Store"
+
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon_list":"characters"}}')
+TEXT=$(extract_text "$RESULT")
+T33_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entries = d.get('canon_list', [])
+ok = '.DS_Store' not in entries
+print('true' if ok else 'false|entries=' + str(entries))
+" <<< "$TEXT")
+rm -f "$TEST_DIR/canon/characters/.DS_Store"
+
+if [ "$(echo "$T33_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 33 ".DS_Store invisible to listCanon" "true"
+else
+  report 33 ".DS_Store invisible to listCanon" "false" "$(echo "$T33_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
