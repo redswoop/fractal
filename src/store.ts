@@ -8,7 +8,7 @@
  * Every function takes a projectId as the first parameter.
  */
 
-import { readFile, writeFile, readdir, rename, mkdir } from "node:fs/promises";
+import { readFile, writeFile, readdir, rename, mkdir, stat, unlink } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -808,24 +808,49 @@ export async function getBeatProse(
 // Canon reads
 // ---------------------------------------------------------------------------
 
-export async function getCanon(projectId: string, type: string, id: string): Promise<{ content: string; meta: unknown }> {
+export async function getCanon(projectId: string, type: string, id: string): Promise<{ content: string; meta: unknown; extended_files: string[] }> {
   const basePath = join(projectRoot(projectId), "canon", type);
+
+  // Directory format: {id}/brief.md
+  const dirBriefPath = join(basePath, id, "brief.md");
+  if (existsSync(dirBriefPath)) {
+    const content = await readMd(dirBriefPath);
+    let meta: unknown = null;
+    const metaPath = join(basePath, id, "meta.json");
+    if (existsSync(metaPath)) {
+      meta = await readJson(metaPath);
+    }
+    const extended = await listExtendedFiles(projectId, type, id);
+    return { content, meta, extended_files: extended };
+  }
+
+  // Flat format: {id}.md
   const content = await readMd(join(basePath, `${id}.md`));
   let meta: unknown = null;
   const metaPath = join(basePath, `${id}.meta.json`);
   if (existsSync(metaPath)) {
     meta = await readJson(metaPath);
   }
-  return { content, meta };
+  return { content, meta, extended_files: [] };
 }
 
 export async function listCanon(projectId: string, type: string): Promise<string[]> {
   const dir = join(projectRoot(projectId), "canon", type);
   if (!existsSync(dir)) return [];
-  const files = await readdir(dir);
-  return files
-    .filter((f) => !shouldIgnore(f) && f.endsWith(".md"))
-    .map((f) => f.replace(/\.md$/, ""));
+  const entries = await readdir(dir, { withFileTypes: true });
+  const ids: string[] = [];
+  for (const entry of entries) {
+    if (shouldIgnore(entry.name) || entry.name.startsWith(".")) continue;
+    if (entry.isFile() && entry.name.endsWith(".md") && !entry.name.endsWith(".meta.json")) {
+      ids.push(entry.name.replace(/\.md$/, ""));
+    } else if (entry.isDirectory()) {
+      // Directory format: check for brief.md inside
+      if (existsSync(join(dir, entry.name, "brief.md"))) {
+        ids.push(entry.name);
+      }
+    }
+  }
+  return ids.sort();
 }
 
 /**
@@ -842,13 +867,49 @@ export async function listCanonTypes(projectId: string): Promise<string[]> {
     .sort();
 }
 
+export async function listExtendedFiles(projectId: string, type: string, id: string): Promise<string[]> {
+  const dir = join(projectRoot(projectId), "canon", type, id);
+  if (!existsSync(dir)) return [];
+  const entries = await readdir(dir);
+  return entries
+    .filter((f) => f.endsWith(".md") && f !== "brief.md" && !shouldIgnore(f))
+    .map((f) => f.replace(/\.md$/, ""))
+    .sort();
+}
+
+export async function getCanonExtended(projectId: string, type: string, id: string, extendedId: string): Promise<string> {
+  const dir = join(projectRoot(projectId), "canon", type, id);
+  const briefPath = join(dir, "brief.md");
+  if (!existsSync(briefPath)) {
+    throw new Error(`Canon entry "${type}/${id}" is not in directory format — no extended files available.`);
+  }
+  const extPath = join(dir, `${extendedId}.md`);
+  if (!existsSync(extPath)) {
+    throw new Error(`Extended file "${extendedId}" not found in canon/${type}/${id}/. Available: ${(await listExtendedFiles(projectId, type, id)).join(", ") || "(none)"}`);
+  }
+  return readMd(extPath);
+}
+
 async function resolveCanon(
   projectId: string,
   id: string
-): Promise<{ content: string; meta: unknown; type: string } | null> {
+): Promise<{ content: string; meta: unknown; type: string; extended_files: string[] } | null> {
   const root = projectRoot(projectId);
   const types = await listCanonTypes(projectId);
   for (const type of types) {
+    // Directory format: {type}/{id}/brief.md
+    const dirBriefPath = join(root, "canon", type, id, "brief.md");
+    if (existsSync(dirBriefPath)) {
+      const content = await readMd(dirBriefPath);
+      let meta: unknown = null;
+      const metaPath = join(root, "canon", type, id, "meta.json");
+      if (existsSync(metaPath)) {
+        meta = await readJson(metaPath);
+      }
+      const extended = await listExtendedFiles(projectId, type, id);
+      return { content, meta, type, extended_files: extended };
+    }
+    // Flat format: {type}/{id}.md
     const mdPath = join(root, "canon", type, `${id}.md`);
     if (existsSync(mdPath)) {
       const content = await readMd(mdPath);
@@ -857,7 +918,7 @@ async function resolveCanon(
       if (existsSync(metaPath)) {
         meta = await readJson(metaPath);
       }
-      return { content, meta, type };
+      return { content, meta, type, extended_files: [] };
     }
   }
   return null;
@@ -1814,19 +1875,34 @@ export async function getContext(
   const response: Record<string, unknown> = {};
   const errors: Record<string, string> = {};
 
-  // Canon — resolve type automatically
+  // Canon — resolve type automatically; supports path notation for extended files
   if (include.canon && include.canon.length > 0) {
     const canon: Record<string, unknown> = {};
-    await Promise.all(include.canon.map(async (id) => {
+    await Promise.all(include.canon.map(async (ref) => {
       try {
-        const result = await resolveCanon(projectId, id);
-        if (result) {
-          canon[id] = result;
+        // Path notation: "unit-7/voice-samples" → entry "unit-7", extended file "voice-samples"
+        const slashIdx = ref.indexOf("/");
+        if (slashIdx !== -1) {
+          const entryId = ref.slice(0, slashIdx);
+          const extendedId = ref.slice(slashIdx + 1);
+          // First resolve to find the type
+          const resolved = await resolveCanon(projectId, entryId);
+          if (!resolved) {
+            errors[`canon:${ref}`] = `Canon entry "${entryId}" not found in any canon type`;
+            return;
+          }
+          const content = await getCanonExtended(projectId, resolved.type, entryId, extendedId);
+          canon[ref] = { content, type: resolved.type };
         } else {
-          errors[`canon:${id}`] = `Canon entry "${id}" not found in any canon type`;
+          const result = await resolveCanon(projectId, ref);
+          if (result) {
+            canon[ref] = result;
+          } else {
+            errors[`canon:${ref}`] = `Canon entry "${ref}" not found in any canon type`;
+          }
         }
       } catch (err) {
-        errors[`canon:${id}`] = err instanceof Error ? err.message : String(err);
+        errors[`canon:${ref}`] = err instanceof Error ? err.message : String(err);
       }
     }));
     if (Object.keys(canon).length > 0) response.canon = canon;
@@ -2192,7 +2268,8 @@ export async function updateCanon(
   type: string,
   id: string,
   content: string,
-  meta?: unknown
+  meta?: unknown,
+  extendedId?: string
 ): Promise<WriteResult[]> {
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
@@ -2202,14 +2279,69 @@ export async function updateCanon(
     await mkdir(basePath, { recursive: true });
   }
 
-  const mdPath = join(basePath, `${id}.md`);
-  await writeMd(mdPath, content);
-  results.push({ path: mdPath, description: `Updated canon/${type}/${id}.md` });
+  const dirPath = join(basePath, id);
+  const dirBriefPath = join(dirPath, "brief.md");
+  const flatMdPath = join(basePath, `${id}.md`);
+  const isDirectory = existsSync(dirBriefPath);
+  const isFlat = existsSync(flatMdPath);
 
-  if (meta) {
-    const metaPath = join(basePath, `${id}.meta.json`);
-    await writeJson(metaPath, meta);
-    results.push({ path: metaPath, description: `Updated canon/${type}/${id}.meta.json` });
+  if (!extendedId) {
+    // Writing the brief
+    if (isDirectory) {
+      // Directory format: write brief.md
+      await writeMd(dirBriefPath, content);
+      results.push({ path: dirBriefPath, description: `Updated canon/${type}/${id}/brief.md` });
+      if (meta) {
+        const metaPath = join(dirPath, "meta.json");
+        await writeJson(metaPath, meta);
+        results.push({ path: metaPath, description: `Updated canon/${type}/${id}/meta.json` });
+      }
+    } else {
+      // Flat format (or new entry)
+      await writeMd(flatMdPath, content);
+      results.push({ path: flatMdPath, description: `Updated canon/${type}/${id}.md` });
+      if (meta) {
+        const metaPath = join(basePath, `${id}.meta.json`);
+        await writeJson(metaPath, meta);
+        results.push({ path: metaPath, description: `Updated canon/${type}/${id}.meta.json` });
+      }
+    }
+  } else {
+    // Writing an extended file
+    if (isFlat) {
+      // Auto-migrate from flat to directory format
+      await mkdir(dirPath, { recursive: true });
+
+      // Move {id}.md → {id}/brief.md
+      const flatContent = await readMd(flatMdPath);
+      await writeMd(dirBriefPath, flatContent);
+      await unlink(flatMdPath);
+      results.push({ path: dirBriefPath, description: `Migrated canon/${type}/${id}.md → ${id}/brief.md` });
+
+      // Move {id}.meta.json → {id}/meta.json if it exists
+      const flatMetaPath = join(basePath, `${id}.meta.json`);
+      if (existsSync(flatMetaPath)) {
+        const metaContent = await readJson(flatMetaPath);
+        await writeJson(join(dirPath, "meta.json"), metaContent);
+        await unlink(flatMetaPath);
+        results.push({ path: join(dirPath, "meta.json"), description: `Migrated canon/${type}/${id}.meta.json → ${id}/meta.json` });
+      }
+    } else if (!isDirectory) {
+      // New entry: create directory format from scratch
+      await mkdir(dirPath, { recursive: true });
+      // Write the content as the brief
+      await writeMd(dirBriefPath, content);
+      results.push({ path: dirBriefPath, description: `Created canon/${type}/${id}/brief.md` });
+      if (meta) {
+        await writeJson(join(dirPath, "meta.json"), meta);
+        results.push({ path: join(dirPath, "meta.json"), description: `Created canon/${type}/${id}/meta.json` });
+      }
+    }
+
+    // Write the extended file
+    const extPath = join(dirPath, `${extendedId}.md`);
+    await writeMd(extPath, content);
+    results.push({ path: extPath, description: `Updated canon/${type}/${id}/${extendedId}.md` });
   }
 
   return results;

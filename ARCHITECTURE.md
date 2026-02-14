@@ -39,9 +39,12 @@ rust-and-flour/
 │
 ├── canon/
 │   ├── characters/
-│   │   ├── unit-7.md               ← readable character doc, plain markdown
-│   │   ├── unit-7.meta.json        ← tags, appears-in refs, last-updated
-│   │   ├── marguerite.md
+│   │   ├── unit-7/                  ← directory format (brief + extended files)
+│   │   │   ├── brief.md            ← lean working state, always loaded
+│   │   │   ├── meta.json           ← tags, appears-in refs, last-updated
+│   │   │   ├── voice-samples.md    ← extended (opt-in)
+│   │   │   └── backstory.md        ← extended (opt-in)
+│   │   ├── marguerite.md           ← flat format (backward compatible)
 │   │   ├── marguerite.meta.json
 │   │   └── ...
 │   ├── locations/
@@ -223,42 +226,115 @@ This is how you (and I) triage. Not everything dirty is urgent.
 
 ## Canon Files
 
-Canon files are **plain markdown**, readable as-is. The meta sidecar tracks references.
+Canon entries are **plain markdown**, readable as-is. The meta sidecar tracks references. Entries support two formats: **flat** (a single file) and **directory** (a brief + extended files).
 
-### `canon/characters/unit-7.md`
+### Two-Tier Canon: Brief + Extended
+
+Most canon entries start as flat files. As a character or location develops, it can be split into a lean **brief** (always loaded, cheap) and modular **extended files** (loaded on demand).
+
+**Directory format** — for entries with extended material:
+```
+canon/characters/unit-7/
+├── brief.md              # Opinionated working state (always loaded)
+├── meta.json             # Metadata sidecar
+├── voice-samples.md      # Extended (opt-in)
+├── backstory.md          # Extended (opt-in)
+└── relationships.md      # Extended (opt-in)
+```
+
+**Flat format** — backward compatible, works unchanged:
+```
+canon/characters/marguerite.md          # Treated as brief
+canon/characters/marguerite.meta.json   # Meta sidecar
+```
+
+**Resolution order**: directory (`{id}/brief.md`) checked first, then flat file (`{id}.md`).
+
+### Brief Content Conventions
+
+The brief is the opinionated working state — what you need to write most scenes. Suggested structure:
+
+- **Identity** — Who/what this is, key physical details
+- **Voice** — How they talk, speech patterns
+- **Current State** — Where they are right now in the story
+- **Active Goals** — What they're trying to do
+- **Key Dynamics** — Important relationships, described briefly
+- **Extended** — Author-written index of available extended files
+
+### Extended Files
+
+Extended files hold deep reference material that most beats don't need:
+
+- `voice-samples` — Dialogue examples showing speech patterns
+- `backstory` — History, origin, formative events
+- `relationships` — Detailed dynamics with all named characters
+- `arc-notes` — Long-form arc planning and trajectory
+
+Load extended files on demand via path notation in `get_context`:
+```
+canon: ["unit-7/voice-samples"]
+```
+
+### Auto-Migration
+
+When you write an extended file to a flat entry (via `update_canon` with `extended_id`), the tool automatically migrates it to directory format — moves `{id}.md` → `{id}/brief.md` and `{id}.meta.json` → `{id}/meta.json`.
+
+### Example: Flat Format
+
+#### `canon/characters/marguerite.md`
+
+```markdown
+# Marguerite
+
+## Core
+- Bakery owner, 60s, weathered hands
+- Has run the bakery for 30 years
+- Recently diagnosed with macular degeneration (going blind)
+```
+
+#### `canon/characters/marguerite.meta.json`
+
+```json
+{
+  "id": "marguerite",
+  "type": "character",
+  "role": "mentor",
+  "appears_in": ["part-01/chapter-01:b02", "part-01/chapter-01:b03"],
+  "last_updated": "2026-02-07T14:30:00Z"
+}
+```
+
+### Example: Directory Format
+
+#### `canon/characters/unit-7/brief.md`
 
 ```markdown
 # Unit 7
 
-## Core
-- Decommissioned industrial assembly robot, 8 feet tall
-- Originally built for the Millhaven auto parts factory
-- Decommissioned 18 months ago when the factory closed
-- Currently without purpose or housing
+## Identity
+Decommissioned industrial robot, 8 feet tall. Lives above Marguerite's bakery.
 
-## Personality
-- Literal, precise, takes everything at face value
-- Speaks in declarative sentences — no metaphor, no subtext
-- Genuinely doesn't understand social cues, but observes everything
-- Processes the world through data — counts, measures, categorizes
+## Voice
+Literal, precise. Declarative sentences. No metaphor. Processes through data.
 
-## Appearance
-- Industrial frame, not designed to look human
-- Hydraulic joints, optical sensors (not eyes)
-- Flour-dusted after Chapter 2 onward
+## Current State
+Learning to bake. Town divided on her presence. Growing attached to Marguerite.
 
-## Arc
-- Starts purposeless — a machine without a task
-- Baking gives her a task. The town's resistance gives her something harder: a reason to stay.
-- Central tension: can a machine want something? And if she can, is she still a machine?
+## Active Goals
+- Find purpose after decommission
+- Master bread dough hydration ratios
 
-## Constraints
-- She NEVER uses metaphor in narration or dialogue. Everything is literal.
-- She doesn't understand emotions but she observes their effects precisely.
-- She cannot eat. She experiences food through sensors (temperature, texture, chemical composition).
+## Key Dynamics
+- **Marguerite**: Teacher, reluctant friend. Anchors the story.
+- **Sheriff Dale**: Suspicious, represents town resistance.
+
+## Extended
+- `voice-samples` — Dialogue examples showing her literal speech patterns
+- `backstory` — Factory life, decommission, journey to town
+- `relationships` — Detailed dynamics with all named characters
 ```
 
-### `canon/characters/unit-7.meta.json`
+#### `canon/characters/unit-7/meta.json`
 
 ```json
 {
@@ -268,9 +344,7 @@ Canon files are **plain markdown**, readable as-is. The meta sidecar tracks refe
   "appears_in": [
     "part-01/chapter-01:b01",
     "part-01/chapter-01:b02",
-    "part-01/chapter-01:b03",
-    "part-01/chapter-02:b01",
-    "part-01/chapter-02:b02"
+    "part-01/chapter-01:b03"
   ],
   "last_updated": "2026-02-07T14:30:00Z",
   "updated_by": "claude-conversation"
@@ -362,7 +436,7 @@ The MCP server exposes these operations. I call them from conversation.
   - `chapter_prose` — full prose with version token (`{prose, version}`)
   - `beats` — individual beat prose by ref (`part-01/chapter-01:b01`)
   - `beat_variants` — all variant blocks for a beat
-  - `canon` — canon entries by ID (type auto-resolved)
+  - `canon` — canon entries by ID (type auto-resolved). Returns brief + extended_files listing. Path notation for extended files: `unit-7/voice-samples`
   - `scratch` — scratch file content by filename
   - `scratch_index` — scratch folder index
   - `dirty_nodes` — all nodes flagged dirty/conflict
@@ -375,7 +449,7 @@ The MCP server exposes these operations. I call them from conversation.
 - `update_chapter_meta(part_id, chapter_id, patch)` → update beat summaries, status, deps
 - `update_part(part_id, patch)` → update part summary/arc/status
 - `update_project(patch)` → update top-level metadata
-- `update_canon(type, id, content)` → rewrite a canon file
+- `update_canon(type, id, content, extended_id?)` → write canon brief or extended file. Auto-migrates flat → directory format when needed
 - `write_beat_prose(part_id, chapter_id, beat_id, content)` → insert/replace prose for a beat
 - `edit_beat_prose(part_id, chapter_id, beat_id, edits)` → surgical string replacements within a beat
 - `add_beat(part_id, chapter_id, beat_def)` → add a new beat to the structure

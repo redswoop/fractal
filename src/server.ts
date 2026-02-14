@@ -263,6 +263,13 @@ async function createMcpServer(): Promise<McpServer> {
     "These are auto-managed — refreshed on writes to beats or meta. " +
     "For chapters missing these comments (created before this feature), call refresh_summaries once per chapter at session start.",
     "",
+    "Canon loading: Canon entries return a brief (lean working state) plus an `extended_files` listing. " +
+    "Load briefs only by default — they contain enough context for most beats. " +
+    "Only load extended files (e.g. 'elena/voice-samples') when you specifically need that depth: " +
+    "writing dialogue that needs voice calibration, a scene that hinges on backstory details, " +
+    "or resolving a relationship dynamic that the brief only sketches. " +
+    "Never bulk-load all extended files preemptively.",
+    "",
     "Current projects:",
     projectLines,
   ].join("\n");
@@ -524,7 +531,7 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: {
       project: projectParam,
       include: z.object({
-        canon: z.array(z.string()).optional().describe("Canon IDs to load, e.g. ['unit-7', 'the-bakery']. Type is inferred by scanning canon directories."),
+        canon: z.array(z.string()).optional().describe("Canon entry IDs to load. Returns brief + extended_files listing. Use path notation for extended files: 'unit-7/voice-samples'. Type is inferred by scanning canon directories."),
         scratch: z.array(z.string()).optional().describe("Scratch filenames, e.g. ['voice-codex.md']"),
         parts: z.array(z.string()).optional().describe("Part IDs, e.g. ['part-01']"),
         chapter_meta: z.array(z.string()).optional().describe("Chapter refs, e.g. ['part-01/chapter-03']"),
@@ -902,12 +909,16 @@ async function createMcpServer(): Promise<McpServer> {
 
   server.registerTool("update_canon", {
     title: "Update Canon",
-    description: "Create or rewrite a canon file (character, location, etc.).",
+    description:
+      "Create or rewrite a canon entry. Two-tier system: each entry has a brief (always loaded, cheap) " +
+      "and optional extended files (loaded on demand via get_context path notation). " +
+      "Without extended_id, writes the brief. With extended_id, writes an extended file and " +
+      "auto-migrates flat entries to directory format if needed.",
     inputSchema: {
       project: projectParam,
       type: z.string().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions'. Use get_context with canon_list: true to see active types."),
       id: z.string().describe("Canon entry id"),
-      content: z.string().describe("Full markdown content for the canon file"),
+      content: z.string().describe("Markdown content — for the brief (without extended_id) or the extended file (with extended_id)"),
       meta: z.object({
         id: z.string().optional().describe("Canon entry id"),
         type: z.string().optional().describe("e.g. 'character', 'location'"),
@@ -916,15 +927,20 @@ async function createMcpServer(): Promise<McpServer> {
         last_updated: z.string().optional().describe("ISO timestamp"),
         updated_by: z.string().optional().describe("e.g. 'claude-conversation'"),
       }).passthrough().optional().describe("Optional metadata for the .meta.json sidecar"),
+      extended_id: z.string().optional().describe(
+        "If provided, writes an extended file instead of the brief. " +
+        "E.g. 'voice-samples' creates canon/{type}/{id}/voice-samples.md. " +
+        "Auto-migrates flat entries to directory format if needed."
+      ),
     },
-  }, async ({ project, type, id, content, meta }) => {
-    logToolCall("update_canon", { project, type, id });
+  }, async ({ project, type, id, content, meta, extended_id }) => {
+    logToolCall("update_canon", { project, type, id, extended_id });
     try {
       const root = store.projectRoot(project);
       const results = await withCommit(
         root,
-        () => store.updateCanon(project, type, id, content, meta),
-        `Canon update: ${type}/${id}.md`
+        () => store.updateCanon(project, type, id, content, meta, extended_id),
+        extended_id ? `Canon update: ${type}/${id}/${extended_id}.md` : `Canon update: ${type}/${id}`
       );
       return jsonResult(results);
     } catch (err) {
@@ -1292,7 +1308,7 @@ app.get("/help", async () => {
         apply_template: "Apply a template to an existing project — adds missing canon dirs, updates GUIDE.md.",
       },
       read: {
-        get_context: "Primary read tool — returns any combination of project data in one call. Supports: project_meta, parts, chapter_meta, chapter_prose (with version), beats, beat_variants, canon, scratch, scratch_index, dirty_nodes, notes, canon_list, guide.",
+        get_context: "Primary read tool — returns any combination of project data in one call. Supports: project_meta, parts, chapter_meta, chapter_prose (with version), beats, beat_variants, canon (with path notation for extended files), scratch, scratch_index, dirty_nodes, notes, canon_list, guide.",
         search: "Full-text search across prose, canon, and scratch files.",
       },
       write: {
@@ -1306,7 +1322,7 @@ app.get("/help", async () => {
         select_beat_variant: "Keep one variant of a beat, archive the rest to scratch.",
         reorder_beats: "Reorder beats within a chapter (meta and prose). Variants stay grouped.",
         mark_node: "Set dirty/clean status on a node. status='dirty' requires a reason.",
-        update_canon: "Create or rewrite a canon file (character, location, etc.).",
+        update_canon: "Create or rewrite a canon entry. Two-tier: brief (always loaded) + extended files (on demand). With extended_id, writes extended file and auto-migrates flat entries.",
         add_scratch: "Add a new file to the scratch folder.",
         promote_scratch: "Move scratch content into a beat in the narrative structure.",
       },

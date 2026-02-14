@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fractal MCP feature test suite
-# Runs 33 tests against the Fractal MCP server on localhost:3001
+# Runs 41 tests against the Fractal MCP server on localhost:3001
 
 set -euo pipefail
 
@@ -830,6 +830,180 @@ if [ "$(echo "$T33_PASS" | cut -d'|' -f1)" = "true" ]; then
   report 33 ".DS_Store invisible to listCanon" "true"
 else
   report 33 ".DS_Store invisible to listCanon" "false" "$(echo "$T33_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 34: Flat canon still works (existing behavior)
+# =========================================================================
+echo "--- Test 34: flat canon update + get_context ---"
+mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"flat-char","content":"# Flat Character\n\nA simple character entry."}' > /dev/null
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["flat-char"]}}')
+TEXT=$(extract_text "$RESULT")
+T34_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('flat-char', {})
+content = entry.get('content', '')
+ext = entry.get('extended_files', [])
+ok = '# Flat Character' in content and ext == []
+print('true' if ok else 'false|content=' + repr(content[:100]) + ' ext=' + str(ext))
+" <<< "$TEXT")
+if [ "$(echo "$T34_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 34 "flat canon: update_canon + get_context returns extended_files=[]" "true"
+else
+  report 34 "flat canon: update_canon + get_context returns extended_files=[]" "false" "$(echo "$T34_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 35: Extended write auto-migrates flat entry to directory
+# =========================================================================
+echo "--- Test 35: extended write auto-migrates flat to directory ---"
+RESULT=$(mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"flat-char","content":"# Voice Samples\n\nDialogue examples for flat-char.","extended_id":"voice-samples"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 35 "extended write auto-migrates" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T35_PASS="true"
+  T35_DETAIL=""
+
+  # Flat file should be gone
+  [ -f "$TEST_DIR/canon/characters/flat-char.md" ] && T35_PASS="false" && T35_DETAIL="flat-char.md still exists;"
+  # Directory should exist
+  [ ! -d "$TEST_DIR/canon/characters/flat-char" ] && T35_PASS="false" && T35_DETAIL="$T35_DETAIL flat-char/ dir missing;"
+  # brief.md should exist
+  [ ! -f "$TEST_DIR/canon/characters/flat-char/brief.md" ] && T35_PASS="false" && T35_DETAIL="$T35_DETAIL brief.md missing;"
+  # voice-samples.md should exist
+  [ ! -f "$TEST_DIR/canon/characters/flat-char/voice-samples.md" ] && T35_PASS="false" && T35_DETAIL="$T35_DETAIL voice-samples.md missing;"
+
+  # Check brief content preserved original content
+  if [ -f "$TEST_DIR/canon/characters/flat-char/brief.md" ]; then
+    BRIEF_HAS_ORIGINAL=$(python3 -c "
+content = open('$TEST_DIR/canon/characters/flat-char/brief.md').read()
+print('true' if '# Flat Character' in content else 'false')
+")
+    [ "$BRIEF_HAS_ORIGINAL" != "true" ] && T35_PASS="false" && T35_DETAIL="$T35_DETAIL brief.md lost original content;"
+  fi
+
+  report 35 "extended write auto-migrates flat to directory" "$T35_PASS" "$T35_DETAIL"
+fi
+
+# =========================================================================
+# Test 36: get_context returns extended_files for directory entry
+# =========================================================================
+echo "--- Test 36: get_context returns extended_files after migration ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["flat-char"]}}')
+TEXT=$(extract_text "$RESULT")
+T36_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('flat-char', {})
+ext = entry.get('extended_files', [])
+content = entry.get('content', '')
+ok = 'voice-samples' in ext and '# Flat Character' in content
+print('true' if ok else 'false|ext=' + str(ext) + ' content=' + repr(content[:100]))
+" <<< "$TEXT")
+if [ "$(echo "$T36_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 36 "get_context returns extended_files=[voice-samples] for directory entry" "true"
+else
+  report 36 "get_context returns extended_files=[voice-samples] for directory entry" "false" "$(echo "$T36_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 37: Path notation loads extended file
+# =========================================================================
+echo "--- Test 37: path notation loads extended file ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["flat-char/voice-samples"]}}')
+TEXT=$(extract_text "$RESULT")
+T37_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('flat-char/voice-samples', {})
+content = entry.get('content', '')
+ok = 'Voice Samples' in content and 'Dialogue examples' in content
+print('true' if ok else 'false|content=' + repr(content[:200]))
+" <<< "$TEXT")
+if [ "$(echo "$T37_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 37 "path notation loads extended file content" "true"
+else
+  report 37 "path notation loads extended file content" "false" "$(echo "$T37_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 38: Brief-only load doesn't include extended content
+# =========================================================================
+echo "--- Test 38: brief-only load excludes extended content ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["flat-char"]}}')
+TEXT=$(extract_text "$RESULT")
+T38_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('flat-char', {})
+content = entry.get('content', '')
+ok = 'Dialogue examples' not in content and '# Flat Character' in content
+print('true' if ok else 'false|has_extended_content=' + str('Dialogue examples' in content))
+" <<< "$TEXT")
+if [ "$(echo "$T38_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 38 "brief-only load excludes extended file content" "true"
+else
+  report 38 "brief-only load excludes extended file content" "false" "$(echo "$T38_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 39: listCanon finds both flat and directory entries
+# =========================================================================
+echo "--- Test 39: listCanon finds both flat and directory entries ---"
+# flat-char is now directory, the-guild is flat in factions. Create a flat character for comparison
+mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"flat-only","content":"# Flat Only\n\nStays flat."}' > /dev/null
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon_list":"characters"}}')
+TEXT=$(extract_text "$RESULT")
+T39_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entries = d.get('canon_list', [])
+has_flat = 'flat-only' in entries
+has_dir = 'flat-char' in entries
+ok = has_flat and has_dir
+print('true' if ok else 'false|entries=' + str(entries) + ' flat=' + str(has_flat) + ' dir=' + str(has_dir))
+" <<< "$TEXT")
+if [ "$(echo "$T39_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 39 "listCanon finds both flat and directory entries" "true"
+else
+  report 39 "listCanon finds both flat and directory entries" "false" "$(echo "$T39_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 40: Direct directory creation (update_canon with extended_id on new entry)
+# =========================================================================
+echo "--- Test 40: direct directory creation ---"
+RESULT=$(mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"new-dir-char","content":"# New Dir Brief\n\nCreated directly as directory.","extended_id":"backstory"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 40 "direct directory creation" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T40_PASS="true"
+  T40_DETAIL=""
+  [ ! -d "$TEST_DIR/canon/characters/new-dir-char" ] && T40_PASS="false" && T40_DETAIL="dir missing;"
+  [ ! -f "$TEST_DIR/canon/characters/new-dir-char/brief.md" ] && T40_PASS="false" && T40_DETAIL="$T40_DETAIL brief.md missing;"
+  [ ! -f "$TEST_DIR/canon/characters/new-dir-char/backstory.md" ] && T40_PASS="false" && T40_DETAIL="$T40_DETAIL backstory.md missing;"
+  report 40 "direct directory creation (new entry with extended_id)" "$T40_PASS" "$T40_DETAIL"
+fi
+
+# =========================================================================
+# Test 41: search finds content in extended files
+# =========================================================================
+echo "--- Test 41: search finds extended file content ---"
+RESULT=$(mcp_call "search" '{"project":"_fractal-test","query":"Dialogue examples","scope":"canon"}')
+TEXT=$(extract_text "$RESULT")
+T41_PASS=$(python3 -c "
+import sys
+text = sys.stdin.read()
+ok = 'voice-samples' in text and 'Dialogue examples' in text
+print('true' if ok else 'false|' + repr(text[:300]))
+" <<< "$TEXT")
+if [ "$(echo "$T41_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 41 "search finds content in extended files" "true"
+else
+  report 41 "search finds content in extended files" "false" "$(echo "$T41_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
