@@ -39,12 +39,10 @@ rust-and-flour/
 │
 ├── canon/
 │   ├── characters/
-│   │   ├── unit-7/                  ← directory format (brief + extended files)
-│   │   │   ├── brief.md            ← lean working state, always loaded
-│   │   │   ├── meta.json           ← tags, appears-in refs, last-updated
-│   │   │   ├── voice-samples.md    ← extended (opt-in)
-│   │   │   └── backstory.md        ← extended (opt-in)
-│   │   ├── marguerite.md           ← flat format (backward compatible)
+│   │   ├── unit-7/                  ← directory format (brief.md + meta.json)
+│   │   │   ├── brief.md            ← the canon entry markdown
+│   │   │   └── meta.json           ← tags, appears-in refs, last-updated
+│   │   ├── marguerite.md           ← flat format (single file)
 │   │   ├── marguerite.meta.json
 │   │   └── ...
 │   ├── locations/
@@ -226,61 +224,39 @@ This is how you (and I) triage. Not everything dirty is urgent.
 
 ## Canon Files
 
-Canon entries are **plain markdown**, readable as-is. The meta sidecar tracks references. Entries support two formats: **flat** (a single file) and **directory** (a brief + extended files).
+Canon entries are **plain markdown**, readable as-is. The meta sidecar tracks references. Entries support two formats: **flat** (a single file) and **directory** (brief.md inside a subdirectory).
 
-### Two-Tier Canon: Brief + Extended
+**Flat format** — the default:
+```
+canon/characters/marguerite.md          # The canon entry
+canon/characters/marguerite.meta.json   # Meta sidecar
+```
 
-Most canon entries start as flat files. As a character or location develops, it can be split into a lean **brief** (always loaded, cheap) and modular **extended files** (loaded on demand).
-
-**Directory format** — for entries with extended material:
+**Directory format** — also supported:
 ```
 canon/characters/unit-7/
-├── brief.md              # Opinionated working state (always loaded)
-├── meta.json             # Metadata sidecar
-├── voice-samples.md      # Extended (opt-in)
-├── backstory.md          # Extended (opt-in)
-└── relationships.md      # Extended (opt-in)
-```
-
-**Flat format** — backward compatible, works unchanged:
-```
-canon/characters/marguerite.md          # Treated as brief
-canon/characters/marguerite.meta.json   # Meta sidecar
+├── brief.md              # The canon entry
+└── meta.json             # Metadata sidecar
 ```
 
 **Resolution order**: directory (`{id}/brief.md`) checked first, then flat file (`{id}.md`).
 
-### Brief Content Conventions
+### Content Conventions
 
-The brief is the opinionated working state — what you need to write most scenes. Suggested structure:
+Use `##` sections to organize canon entries. Suggested structure:
 
 - **Identity** — Who/what this is, key physical details
 - **Voice** — How they talk, speech patterns
 - **Current State** — Where they are right now in the story
 - **Active Goals** — What they're trying to do
 - **Key Dynamics** — Important relationships, described briefly
-- **Extended** — Author-written index of available extended files
-
-### Extended Files
-
-Extended files hold deep reference material that most beats don't need:
-
-- `voice-samples` — Dialogue examples showing speech patterns
-- `backstory` — History, origin, formative events
-- `relationships` — Detailed dynamics with all named characters
-- `arc-notes` — Long-form arc planning and trajectory
-
-Load extended files on demand via path notation in `get_context`:
-```
-canon: ["unit-7/voice-samples"]
-```
 
 ### Section-Level Lazy Loading
 
 Canon entries with `##` headers support section-level fetching. When you request a canon entry, the response returns only the **top-matter** (text before the first `##`) plus a **sections TOC** listing available `##` headers with their slugified IDs. Fetch specific sections by appending `#slug` to the entry ID:
 
 ```
-canon: ["emmy"]                        → summary + sections TOC + extended_files
+canon: ["emmy"]                        → summary + sections TOC
 canon: ["emmy#voice-personality"]      → just the ## Voice & Personality section
 canon: ["emmy#core", "emmy#arc-summary"]  → batch multiple sections
 ```
@@ -294,10 +270,6 @@ Section IDs are slugified from headers: `"Physical (Pre-Transformation)"` → `p
 ```
 
 If a canon file has no `##` headers, the full content is returned as before (backward compatible).
-
-### Auto-Migration
-
-When you write an extended file to a flat entry (via `update_canon` with `extended_id`), the tool automatically migrates it to directory format — moves `{id}.md` → `{id}/brief.md` and `{id}.meta.json` → `{id}/meta.json`.
 
 ### Example: Flat Format
 
@@ -348,10 +320,6 @@ Learning to bake. Town divided on her presence. Growing attached to Marguerite.
 - **Marguerite**: Teacher, reluctant friend. Anchors the story.
 - **Sheriff Dale**: Suspicious, represents town resistance.
 
-## Extended
-- `voice-samples` — Dialogue examples showing her literal speech patterns
-- `backstory` — Factory life, decommission, journey to town
-- `relationships` — Detailed dynamics with all named characters
 ```
 
 #### `canon/characters/unit-7/meta.json`
@@ -455,9 +423,21 @@ The `[auto]` commits happen per-operation. The `[session]` commits are summaries
 
 ## How Claude Interacts With All This (MCP Tools)
 
-The MCP server exposes these operations. I call them from conversation.
+The MCP server exposes 28 tools. I call them from conversation.
 
-### Read operations
+### Project & template management (6 tools)
+- `list_projects()` → list all projects with status briefing (dirty nodes, open notes, last session)
+- `create_project(project, title, template?)` → bootstrap a new project with directories, starter files, git init
+- `list_templates()` → list available project templates
+- `get_template(template_id)` → return full template contents (canon types, themes, guide)
+- `update_template(template_id, name, description, canon_types, ...)` → create or update a template
+- `apply_template(project, template_id)` → apply/re-apply a template to an existing project
+
+### Structure creation (2 tools)
+- `create_part(project, part_id, title, ...)` → create a new part directory with part.json
+- `create_chapter(project, part_id, chapter_id, title, ...)` → create a new chapter (prose .md + .meta.json)
+
+### Read operations (2 tools)
 - `get_context(include)` → primary read tool. Returns any combination of:
   - `project_meta` — project.json enriched with `canon_types_active` and `has_guide`
   - `parts` — part metadata by ID
@@ -465,7 +445,7 @@ The MCP server exposes these operations. I call them from conversation.
   - `chapter_prose` — full prose with version token (`{prose, version}`)
   - `beats` — individual beat prose by ref (`part-01/chapter-01:b01`)
   - `beat_variants` — all variant blocks for a beat
-  - `canon` — canon entries by ID (type auto-resolved). Returns summary + sections TOC + extended_files listing. Use `#` for section fetch: `emmy#voice-personality`. Use `/` for extended files: `unit-7/voice-samples`
+  - `canon` — canon entries by ID (type auto-resolved). Returns summary + sections TOC. Use `#` for section fetch: `emmy#voice-personality`
   - `scratch` — scratch file content by filename
   - `scratch_index` — scratch folder index
   - `dirty_nodes` — all nodes flagged dirty/conflict
@@ -474,22 +454,37 @@ The MCP server exposes these operations. I call them from conversation.
   - `guide` — GUIDE.md content
 - `search(query, scope?)` → full-text search across prose, canon, scratch
 
-### Write operations
-- `update_chapter_meta(part_id, chapter_id, patch)` → update beat summaries, status, deps
-- `update_part(part_id, patch)` → update part summary/arc/status
+### Metadata updates (3 tools)
 - `update_project(patch)` → update top-level metadata
-- `update_canon(type, id, content, extended_id?)` → write canon brief or extended file. Auto-migrates flat → directory format when needed
+- `update_part(part_id, patch)` → update part summary/arc/status
+- `update_chapter_meta(part_id, chapter_id, patch)` → update beat summaries, status, deps
+
+### Prose operations (2 tools)
 - `write_beat_prose(part_id, chapter_id, beat_id, content)` → insert/replace prose for a beat
 - `edit_beat_prose(part_id, chapter_id, beat_id, edits)` → surgical string replacements within a beat
+
+### Beat structure (4 tools)
 - `add_beat(part_id, chapter_id, beat_def)` → add a new beat to the structure
 - `remove_beat(part_id, chapter_id, beat_id)` → remove a beat (prose moves to scratch)
 - `select_beat_variant(part_id, chapter_id, beat_id, keep_index)` → keep one variant, archive rest
 - `reorder_beats(part_id, chapter_id, beat_order)` → reorder beats in a chapter
+
+### Canon (2 tools)
+- `update_canon(type, id, content)` → write canon entry markdown (replaces entire file)
+- `edit_canon(type, id, edits)` → surgical string replacements within a canon entry
+
+### State & annotations (3 tools)
 - `mark_node(node_ref, status, reason?)` → set dirty/clean status on a node
-- `add_scratch(filename, content, note)` → toss something in the scratch folder
-- `promote_scratch(filename, target)` → move scratch content into the narrative structure
 - `add_note(part_id, chapter_id, line_number, type, message?)` → insert inline annotation
 - `resolve_notes(note_ids)` → batch-remove annotations by ID
+
+### Scratch (2 tools)
+- `add_scratch(filename, content, note)` → toss something in the scratch folder
+- `promote_scratch(filename, target)` → move scratch content into the narrative structure
+
+### Maintenance (2 tools)
+- `session_summary(project, message)` → create a session-level git commit summarizing work done
+- `refresh_summaries(project, part_id, chapter_id)` → regenerate chapter-brief and beat-brief comments from meta
 
 ### Every write operation triggers a git commit.
 
