@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fractal MCP feature test suite
-# Runs 41 tests against the Fractal MCP server on localhost:3001
+# Runs 46 tests against the Fractal MCP server on localhost:3001
 
 set -euo pipefail
 
@@ -1004,6 +1004,124 @@ if [ "$(echo "$T41_PASS" | cut -d'|' -f1)" = "true" ]; then
   report 41 "search finds content in extended files" "true"
 else
   report 41 "search finds content in extended files" "false" "$(echo "$T41_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 42: Canon entry with ## sections → returns sections array + top-matter only
+# =========================================================================
+echo "--- Test 42: canon entry returns sections TOC and top-matter ---"
+mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"sectioned-char","content":"# Sectioned Character\n\nTop-matter summary line.\n\n## Core\n\n- Age: 30\n- Role: Tester\n\n## Voice & Personality\n\n- Dry wit, short sentences\n- Never uses metaphor\n\n## Arc Summary\n\nGoes from doubt to confidence."}' > /dev/null
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["sectioned-char"]}}')
+TEXT=$(extract_text "$RESULT")
+T42_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('sectioned-char', {})
+content = entry.get('content', '')
+sections = entry.get('sections', [])
+# content should be top-matter only (no ## headers)
+has_top = 'Top-matter summary' in content
+no_section_content = '## Core' not in content and '## Voice' not in content
+has_sections = len(sections) == 3
+section_ids = [s.get('id') for s in sections] if has_sections else []
+ids_ok = section_ids == ['core', 'voice--personality', 'arc-summary'] or section_ids == ['core', 'voice-personality', 'arc-summary']
+ok = has_top and no_section_content and has_sections and ids_ok
+print('true' if ok else 'false|content=' + repr(content[:200]) + ' sections=' + str(sections) + ' ids=' + str(section_ids))
+" <<< "$TEXT")
+if [ "$(echo "$T42_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 42 "canon entry returns sections TOC + top-matter only" "true"
+else
+  report 42 "canon entry returns sections TOC + top-matter only" "false" "$(echo "$T42_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 43: Fetch specific canon section via # notation
+# =========================================================================
+echo "--- Test 43: fetch canon section via # notation ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["sectioned-char#voice-personality"]}}')
+TEXT=$(extract_text "$RESULT")
+T43_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('sectioned-char#voice-personality', {})
+content = entry.get('content', '')
+has_header = '## Voice & Personality' in content
+has_detail = 'Dry wit' in content
+no_other = '## Core' not in content and '## Arc' not in content
+ok = has_header and has_detail and no_other
+print('true' if ok else 'false|content=' + repr(content[:300]))
+" <<< "$TEXT")
+if [ "$(echo "$T43_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 43 "# notation returns specific section content" "true"
+else
+  report 43 "# notation returns specific section content" "false" "$(echo "$T43_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 44: Batch fetch multiple sections
+# =========================================================================
+echo "--- Test 44: batch fetch multiple sections ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["sectioned-char#core","sectioned-char#arc-summary"]}}')
+TEXT=$(extract_text "$RESULT")
+T44_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+canon = d.get('canon', {})
+has_core = 'sectioned-char#core' in canon
+has_arc = 'sectioned-char#arc-summary' in canon
+core_ok = '## Core' in canon.get('sectioned-char#core', {}).get('content', '') if has_core else False
+arc_ok = '## Arc Summary' in canon.get('sectioned-char#arc-summary', {}).get('content', '') if has_arc else False
+ok = has_core and has_arc and core_ok and arc_ok
+print('true' if ok else 'false|has_core=' + str(has_core) + ' has_arc=' + str(has_arc) + ' core_ok=' + str(core_ok) + ' arc_ok=' + str(arc_ok))
+" <<< "$TEXT")
+if [ "$(echo "$T44_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 44 "batch fetch multiple sections via # notation" "true"
+else
+  report 44 "batch fetch multiple sections via # notation" "false" "$(echo "$T44_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 45: Nonexistent section returns error with available sections list
+# =========================================================================
+echo "--- Test 45: nonexistent section returns helpful error ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["sectioned-char#nonexistent"]}}')
+TEXT=$(extract_text "$RESULT")
+T45_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+errors = d.get('errors', {})
+err_key = 'canon:sectioned-char#nonexistent'
+has_error = err_key in errors
+err_msg = errors.get(err_key, '')
+mentions_available = 'core' in err_msg and 'voice-personality' in err_msg
+ok = has_error and mentions_available
+print('true' if ok else 'false|errors=' + str(errors))
+" <<< "$TEXT")
+if [ "$(echo "$T45_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 45 "nonexistent section returns error listing available sections" "true"
+else
+  report 45 "nonexistent section returns error listing available sections" "false" "$(echo "$T45_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 46: Canon entry without ## headers returns full content (backward compat)
+# =========================================================================
+echo "--- Test 46: canon without ## headers returns full content ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["the-guild"]}}')
+TEXT=$(extract_text "$RESULT")
+T46_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('the-guild', {})
+content = entry.get('content', '')
+sections = entry.get('sections', [])
+ok = '# The Guild' in content and 'powerful faction' in content and sections == []
+print('true' if ok else 'false|content=' + repr(content[:200]) + ' sections=' + str(sections))
+" <<< "$TEXT")
+if [ "$(echo "$T46_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 46 "canon without ## headers returns full content, sections=[]" "true"
+else
+  report 46 "canon without ## headers returns full content, sections=[]" "false" "$(echo "$T46_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================

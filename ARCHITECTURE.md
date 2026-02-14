@@ -275,6 +275,26 @@ Load extended files on demand via path notation in `get_context`:
 canon: ["unit-7/voice-samples"]
 ```
 
+### Section-Level Lazy Loading
+
+Canon entries with `##` headers support section-level fetching. When you request a canon entry, the response returns only the **top-matter** (text before the first `##`) plus a **sections TOC** listing available `##` headers with their slugified IDs. Fetch specific sections by appending `#slug` to the entry ID:
+
+```
+canon: ["emmy"]                        → summary + sections TOC + extended_files
+canon: ["emmy#voice-personality"]      → just the ## Voice & Personality section
+canon: ["emmy#core", "emmy#arc-summary"]  → batch multiple sections
+```
+
+Section IDs are slugified from headers: `"Physical (Pre-Transformation)"` → `physical-pre-transformation`. The sections array in the response includes both display names and slugs:
+```json
+"sections": [
+  { "name": "Core", "id": "core" },
+  { "name": "Voice & Personality", "id": "voice-personality" }
+]
+```
+
+If a canon file has no `##` headers, the full content is returned as before (backward compatible).
+
 ### Auto-Migration
 
 When you write an extended file to a flat entry (via `update_canon` with `extended_id`), the tool automatically migrates it to directory format — moves `{id}.md` → `{id}/brief.md` and `{id}.meta.json` → `{id}/meta.json`.
@@ -445,7 +465,7 @@ The MCP server exposes these operations. I call them from conversation.
   - `chapter_prose` — full prose with version token (`{prose, version}`)
   - `beats` — individual beat prose by ref (`part-01/chapter-01:b01`)
   - `beat_variants` — all variant blocks for a beat
-  - `canon` — canon entries by ID (type auto-resolved). Returns brief + extended_files listing. Path notation for extended files: `unit-7/voice-samples`
+  - `canon` — canon entries by ID (type auto-resolved). Returns summary + sections TOC + extended_files listing. Use `#` for section fetch: `emmy#voice-personality`. Use `/` for extended files: `unit-7/voice-samples`
   - `scratch` — scratch file content by filename
   - `scratch_index` — scratch folder index
   - `dirty_nodes` — all nodes flagged dirty/conflict

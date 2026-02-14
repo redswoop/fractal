@@ -537,7 +537,7 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: {
       project: projectParam,
       include: z.object({
-        canon: z.array(z.string()).optional().describe("Canon entry IDs to load. Returns brief + extended_files listing. Use path notation for extended files: 'unit-7/voice-samples'. Type is inferred by scanning canon directories."),
+        canon: z.array(z.string()).optional().describe("Canon entry IDs to load. Returns summary (top-matter before first ## header) + sections TOC + extended_files listing. Use # for sections: 'emmy#voice-personality'. Use / for extended files: 'emmy/voice-samples'. Type is inferred by scanning canon directories."),
         scratch: z.array(z.string()).optional().describe("Scratch filenames, e.g. ['voice-codex.md']"),
         parts: z.array(z.string()).optional().describe("Part IDs, e.g. ['part-01']"),
         chapter_meta: z.array(z.string()).optional().describe("Chapter refs, e.g. ['part-01/chapter-03']"),

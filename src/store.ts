@@ -890,38 +890,139 @@ export async function getCanonExtended(projectId: string, type: string, id: stri
   return readMd(extPath);
 }
 
+// ---------------------------------------------------------------------------
+// Canon section parsing — lazy-load sections by slug
+// ---------------------------------------------------------------------------
+
+export interface CanonSection {
+  name: string;    // "Voice & Personality"
+  id: string;      // "voice-personality"
+  content: string; // Full text of section including header
+}
+
+export interface ParsedCanon {
+  topMatter: string;
+  sections: CanonSection[];
+}
+
+export function slugify(heading: string): string {
+  return heading
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+export function splitMarkdownSections(markdown: string): ParsedCanon {
+  const lines = markdown.split("\n");
+  let topMatter = "";
+  const sections: CanonSection[] = [];
+  let currentSection: CanonSection | null = null;
+
+  // Track slug counts for deduplication
+  const slugCounts = new Map<string, number>();
+
+  for (const line of lines) {
+    const match = line.match(/^## (.+)$/);
+    if (match) {
+      if (currentSection) {
+        currentSection.content = currentSection.content.trimEnd();
+        sections.push(currentSection);
+      }
+      let slug = slugify(match[1]);
+      const count = slugCounts.get(slug) ?? 0;
+      slugCounts.set(slug, count + 1);
+      if (count > 0) slug = `${slug}-${count + 1}`;
+      currentSection = { name: match[1], id: slug, content: line + "\n" };
+    } else if (currentSection) {
+      currentSection.content += line + "\n";
+    } else {
+      topMatter += line + "\n";
+    }
+  }
+  if (currentSection) {
+    currentSection.content = currentSection.content.trimEnd();
+    sections.push(currentSection);
+  }
+
+  return { topMatter: topMatter.trimEnd(), sections };
+}
+
 async function resolveCanon(
   projectId: string,
   id: string
-): Promise<{ content: string; meta: unknown; type: string; extended_files: string[] } | null> {
+): Promise<{ content: string; meta: unknown; type: string; extended_files: string[]; sections: Array<{ name: string; id: string }> } | null> {
   const root = projectRoot(projectId);
   const types = await listCanonTypes(projectId);
   for (const type of types) {
     // Directory format: {type}/{id}/brief.md
     const dirBriefPath = join(root, "canon", type, id, "brief.md");
     if (existsSync(dirBriefPath)) {
-      const content = await readMd(dirBriefPath);
+      const rawContent = await readMd(dirBriefPath);
       let meta: unknown = null;
       const metaPath = join(root, "canon", type, id, "meta.json");
       if (existsSync(metaPath)) {
         meta = await readJson(metaPath);
       }
       const extended = await listExtendedFiles(projectId, type, id);
-      return { content, meta, type, extended_files: extended };
+      const parsed = splitMarkdownSections(rawContent);
+      const content = parsed.sections.length > 0 ? parsed.topMatter : rawContent;
+      const sections = parsed.sections.map(s => ({ name: s.name, id: s.id }));
+      return { content, meta, type, extended_files: extended, sections };
     }
     // Flat format: {type}/{id}.md
     const mdPath = join(root, "canon", type, `${id}.md`);
     if (existsSync(mdPath)) {
-      const content = await readMd(mdPath);
+      const rawContent = await readMd(mdPath);
       let meta: unknown = null;
       const metaPath = join(root, "canon", type, `${id}.meta.json`);
       if (existsSync(metaPath)) {
         meta = await readJson(metaPath);
       }
-      return { content, meta, type, extended_files: [] };
+      const parsed = splitMarkdownSections(rawContent);
+      const content = parsed.sections.length > 0 ? parsed.topMatter : rawContent;
+      const sections = parsed.sections.map(s => ({ name: s.name, id: s.id }));
+      return { content, meta, type, extended_files: [], sections };
     }
   }
   return null;
+}
+
+async function getCanonSection(
+  projectId: string,
+  entryId: string,
+  sectionId: string
+): Promise<{ content: string; type: string }> {
+  const root = projectRoot(projectId);
+  const types = await listCanonTypes(projectId);
+  for (const type of types) {
+    // Directory format
+    const dirBriefPath = join(root, "canon", type, entryId, "brief.md");
+    if (existsSync(dirBriefPath)) {
+      const rawContent = await readMd(dirBriefPath);
+      const parsed = splitMarkdownSections(rawContent);
+      const section = parsed.sections.find(s => s.id === sectionId);
+      if (!section) {
+        const available = parsed.sections.map(s => s.id).join(", ");
+        throw new Error(`Section '${sectionId}' not found in ${entryId}. Available: ${available || "(none)"}`);
+      }
+      return { content: section.content, type };
+    }
+    // Flat format
+    const mdPath = join(root, "canon", type, `${entryId}.md`);
+    if (existsSync(mdPath)) {
+      const rawContent = await readMd(mdPath);
+      const parsed = splitMarkdownSections(rawContent);
+      const section = parsed.sections.find(s => s.id === sectionId);
+      if (!section) {
+        const available = parsed.sections.map(s => s.id).join(", ");
+        throw new Error(`Section '${sectionId}' not found in ${entryId}. Available: ${available || "(none)"}`);
+      }
+      return { content: section.content, type };
+    }
+  }
+  throw new Error(`Canon entry "${entryId}" not found in any canon type`);
 }
 
 function parseChapterRef(ref: string): { partId: string; chapterId: string } {
@@ -1875,11 +1976,20 @@ export async function getContext(
   const response: Record<string, unknown> = {};
   const errors: Record<string, string> = {};
 
-  // Canon — resolve type automatically; supports path notation for extended files
+  // Canon — resolve type automatically; supports # for sections and / for extended files
   if (include.canon && include.canon.length > 0) {
     const canon: Record<string, unknown> = {};
     await Promise.all(include.canon.map(async (ref) => {
       try {
+        // Section notation: "emmy#voice-personality" → entry "emmy", section "voice-personality"
+        const hashIdx = ref.indexOf("#");
+        if (hashIdx !== -1) {
+          const entryId = ref.slice(0, hashIdx);
+          const sectionId = ref.slice(hashIdx + 1);
+          const result = await getCanonSection(projectId, entryId, sectionId);
+          canon[ref] = { content: result.content, type: result.type };
+          return;
+        }
         // Path notation: "unit-7/voice-samples" → entry "unit-7", extended file "voice-samples"
         const slashIdx = ref.indexOf("/");
         if (slashIdx !== -1) {
@@ -1894,6 +2004,7 @@ export async function getContext(
           const content = await getCanonExtended(projectId, resolved.type, entryId, extendedId);
           canon[ref] = { content, type: resolved.type };
         } else {
+          // Summary + TOC fetch
           const result = await resolveCanon(projectId, ref);
           if (result) {
             canon[ref] = result;
