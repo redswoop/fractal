@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fractal MCP feature test suite
-# Runs 46 tests against the Fractal MCP server on localhost:3001
+# Runs 43+ tests against the Fractal MCP server on localhost:3001
+# Tests the 12 consolidated tools (down from 28)
 
 set -euo pipefail
 
@@ -95,7 +96,7 @@ report() {
 }
 
 echo "================================================================="
-echo "Fractal MCP -- Template-Driven Canon Types Test Suite"
+echo "Fractal MCP -- Consolidated Tools Test Suite (12 tools)"
 echo "================================================================="
 echo ""
 
@@ -109,10 +110,10 @@ echo "Cleaned test directory: $TEST_DIR"
 echo ""
 
 # =========================================================================
-# Test 1: list_templates
+# Test 1: template action=list
 # =========================================================================
-echo "--- Test 1: list_templates ---"
-RESULT=$(mcp_call "list_templates" '{}')
+echo "--- Test 1: template action=list ---"
+RESULT=$(mcp_call "template" '{"action":"list"}')
 TEXT=$(extract_text "$RESULT")
 T1_PASS=$(python3 -c "
 import json, sys
@@ -126,16 +127,16 @@ else:
 " <<< "$TEXT")
 
 if [ "$(echo "$T1_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 1 "list_templates returns at least 4 templates" "true"
+  report 1 "template list returns at least 4 templates" "true"
 else
-  report 1 "list_templates returns at least 4 templates" "false" "$(echo "$T1_PASS" | cut -d'|' -f2-)"
+  report 1 "template list returns at least 4 templates" "false" "$(echo "$T1_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 2: get_template returns full contents
+# Test 2: template action=get returns full contents
 # =========================================================================
-echo "--- Test 2: get_template ---"
-RESULT=$(mcp_call "get_template" '{"template_id":"litrpg"}')
+echo "--- Test 2: template action=get ---"
+RESULT=$(mcp_call "template" '{"action":"get","template_id":"litrpg"}')
 TEXT=$(extract_text "$RESULT")
 T2_PASS=$(python3 -c "
 import json, sys
@@ -149,19 +150,19 @@ print('true' if ok else 'false|canon_types=' + str(ids) + ' guide_len=' + str(le
 " <<< "$TEXT")
 
 if [ "$(echo "$T2_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 2 "get_template returns full litrpg (6 types, themes, guide)" "true"
+  report 2 "template get returns full litrpg (6 types, themes, guide)" "true"
 else
-  report 2 "get_template returns full litrpg (6 types, themes, guide)" "false" "$(echo "$T2_PASS" | cut -d'|' -f2-)"
+  report 2 "template get returns full litrpg (6 types, themes, guide)" "false" "$(echo "$T2_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 3: create_project without template
+# Test 3: create target=project without template
 # =========================================================================
-echo "--- Test 3: create_project without template ---"
-RESULT=$(mcp_call "create_project" '{"project":"_fractal-test","title":"Template Test"}')
+echo "--- Test 3: create target=project without template ---"
+RESULT=$(mcp_call "create" '{"target":"project","project":"_fractal-test","title":"Template Test"}')
 ERR=$(is_error "$RESULT")
 if [ "$ERR" = "true" ]; then
-  report 3 "create_project without template" "false" "Tool error: $(extract_text "$RESULT")"
+  report 3 "create project without template" "false" "Tool error: $(extract_text "$RESULT")"
 else
   T3_PASS="true"
   T3_DETAIL=""
@@ -175,7 +176,7 @@ print('true' if 'canon_types' in d and len(d['canon_types']) > 0 else 'false')
 ")
   [ "$HAS_CT" != "true" ] && T3_PASS="false" && T3_DETAIL="$T3_DETAIL; project.json missing canon_types"
 
-  report 3 "create_project without template -- filesystem checks" "$T3_PASS" "$T3_DETAIL"
+  report 3 "create project without template -- filesystem checks" "$T3_PASS" "$T3_DETAIL"
 fi
 
 # =========================================================================
@@ -204,13 +205,13 @@ else
 fi
 
 # =========================================================================
-# Test 5: apply_template to existing project (adds dirs + GUIDE.md)
+# Test 5: template action=apply to existing project (adds dirs + GUIDE.md)
 # =========================================================================
-echo "--- Test 5: apply_template (worldbuilding -> existing project) ---"
-RESULT=$(mcp_call "apply_template" '{"project":"_fractal-test","template_id":"worldbuilding"}')
+echo "--- Test 5: template action=apply (worldbuilding -> existing project) ---"
+RESULT=$(mcp_call "template" '{"action":"apply","project":"_fractal-test","template_id":"worldbuilding"}')
 ERR=$(is_error "$RESULT")
 if [ "$ERR" = "true" ]; then
-  report 5 "apply_template worldbuilding" "false" "Tool error: $(extract_text "$RESULT")"
+  report 5 "template apply worldbuilding" "false" "Tool error: $(extract_text "$RESULT")"
 else
   T5_PASS="true"
   T5_DETAIL=""
@@ -235,13 +236,13 @@ print('true' if d.get('guide_updated') else 'false')
 " <<< "$TEXT")
   [ "$GUIDE_UPDATED" != "true" ] && T5_PASS="false" && T5_DETAIL="$T5_DETAIL guide_updated=$GUIDE_UPDATED;"
 
-  report 5 "apply_template adds canon dirs and GUIDE.md" "$T5_PASS" "$T5_DETAIL"
+  report 5 "template apply adds canon dirs and GUIDE.md" "$T5_PASS" "$T5_DETAIL"
 fi
 
 # =========================================================================
 # Test 6: get_context project_meta reflects applied template
 # =========================================================================
-echo "--- Test 6: get_context project_meta after apply_template ---"
+echo "--- Test 6: get_context project_meta after template apply ---"
 RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"project_meta":true}}')
 TEXT=$(extract_text "$RESULT")
 T6_PASS=$(python3 -c "
@@ -261,16 +262,16 @@ else
 fi
 
 # =========================================================================
-# Test 7: update_template creates a new custom template
+# Test 7: template action=save creates a new custom template
 # =========================================================================
-echo "--- Test 7: update_template (create custom) ---"
-RESULT=$(mcp_call "update_template" '{"template_id":"_test-custom","name":"Test Custom","description":"A test template","canon_types":[{"id":"characters","label":"Characters","description":"People"},{"id":"tech","label":"Technology","description":"Gadgets and inventions"}],"themes":["innovation","disruption"],"guide":"# Custom Guide\n\nA minimal test guide."}')
+echo "--- Test 7: template action=save (create custom) ---"
+RESULT=$(mcp_call "template" '{"action":"save","template_id":"_test-custom","name":"Test Custom","description":"A test template","canon_types":[{"id":"characters","label":"Characters","description":"People"},{"id":"tech","label":"Technology","description":"Gadgets and inventions"}],"themes":["innovation","disruption"],"guide":"# Custom Guide\n\nA minimal test guide."}')
 ERR=$(is_error "$RESULT")
 if [ "$ERR" = "true" ]; then
-  report 7 "update_template create custom" "false" "Tool error: $(extract_text "$RESULT")"
+  report 7 "template save custom" "false" "Tool error: $(extract_text "$RESULT")"
 else
   # Verify by reading it back
-  RESULT2=$(mcp_call "get_template" '{"template_id":"_test-custom"}')
+  RESULT2=$(mcp_call "template" '{"action":"get","template_id":"_test-custom"}')
   TEXT2=$(extract_text "$RESULT2")
   T7_PASS=$(python3 -c "
 import json, sys
@@ -281,25 +282,25 @@ print('true' if ok else 'false|name=' + str(d.get('name')) + ' types=' + str(ids
 " <<< "$TEXT2")
 
   if [ "$(echo "$T7_PASS" | cut -d'|' -f1)" = "true" ]; then
-    report 7 "update_template creates and get_template reads back" "true"
+    report 7 "template save creates and get reads back" "true"
   else
-    report 7 "update_template creates and get_template reads back" "false" "$(echo "$T7_PASS" | cut -d'|' -f2-)"
+    report 7 "template save creates and get reads back" "false" "$(echo "$T7_PASS" | cut -d'|' -f2-)"
   fi
 fi
 
 # =========================================================================
-# Test 8: create canon with custom type (factions)
+# Test 8: write target=canon with custom type (factions)
 # =========================================================================
-echo "--- Test 8: update_canon with custom type (factions) ---"
-RESULT=$(mcp_call "update_canon" '{"project":"_fractal-test","type":"factions","id":"the-guild","content":"# The Guild\n\nA powerful faction."}')
+echo "--- Test 8: write target=canon with custom type (factions) ---"
+RESULT=$(mcp_call "write" '{"target":"canon","project":"_fractal-test","type":"factions","id":"the-guild","content":"# The Guild\n\nA powerful faction."}')
 ERR=$(is_error "$RESULT")
 if [ "$ERR" = "true" ]; then
-  report 8 "update_canon with custom type (factions)" "false" "$(extract_text "$RESULT")"
+  report 8 "write canon with custom type (factions)" "false" "$(extract_text "$RESULT")"
 else
   if [ -f "$TEST_DIR/canon/factions/the-guild.md" ]; then
-    report 8 "update_canon with custom type (factions)" "true"
+    report 8 "write canon with custom type (factions)" "true"
   else
-    report 8 "update_canon with custom type (factions)" "false" "File not on disk"
+    report 8 "write canon with custom type (factions)" "false" "File not on disk"
   fi
 fi
 
@@ -325,13 +326,13 @@ else
 fi
 
 # =========================================================================
-# Test 10: get_context with guide
+# Test 10: get_context with guide and canon
 # =========================================================================
 echo "--- Test 10: get_context with guide and canon ---"
 
 # Create part and chapter
-mcp_call "create_part" '{"project":"_fractal-test","part_id":"part-01","title":"Part One"}' > /dev/null
-mcp_call "create_chapter" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","title":"Chapter One"}' > /dev/null
+mcp_call "create" '{"target":"part","project":"_fractal-test","part_id":"part-01","title":"Part One"}' > /dev/null
+mcp_call "create" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","title":"Chapter One"}' > /dev/null
 
 RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"guide":true,"canon":["the-guild"]}}')
 TEXT=$(extract_text "$RESULT")
@@ -399,13 +400,13 @@ else
 fi
 
 # =========================================================================
-# Test 13: apply_template is idempotent (re-apply doesn't duplicate)
+# Test 13: template apply is idempotent (re-apply doesn't duplicate)
 # =========================================================================
-echo "--- Test 13: apply_template idempotent ---"
-RESULT=$(mcp_call "apply_template" '{"project":"_fractal-test","template_id":"worldbuilding"}')
+echo "--- Test 13: template apply idempotent ---"
+RESULT=$(mcp_call "template" '{"action":"apply","project":"_fractal-test","template_id":"worldbuilding"}')
 ERR=$(is_error "$RESULT")
 if [ "$ERR" = "true" ]; then
-  report 13 "apply_template idempotent" "false" "Tool error: $(extract_text "$RESULT")"
+  report 13 "template apply idempotent" "false" "Tool error: $(extract_text "$RESULT")"
 else
   CANON_COUNT=$(python3 -c "
 import json; d = json.load(open('$TEST_DIR/project.json'))
@@ -413,17 +414,17 @@ print(len(d.get('canon_types', [])))
 ")
   # Should still be 5, not 10
   if [ "$CANON_COUNT" = "5" ]; then
-    report 13 "apply_template idempotent -- still 5 canon types after re-apply" "true"
+    report 13 "template apply idempotent -- still 5 canon types after re-apply" "true"
   else
-    report 13 "apply_template idempotent -- still 5 canon types after re-apply" "false" "count=$CANON_COUNT (expected 5)"
+    report 13 "template apply idempotent -- still 5 canon types after re-apply" "false" "count=$CANON_COUNT (expected 5)"
   fi
 fi
 
 # =========================================================================
-# Test 14: add_beat injects beat-brief comment into .md
+# Test 14: create target=beat injects beat-brief comment into .md
 # =========================================================================
-echo "--- Test 14: add_beat injects beat-brief into prose file ---"
-mcp_call "add_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b01","label":"The guild arrives","summary":"The Guild marches into town at dawn. Banners flying, armor gleaming. The townsfolk watch from shuttered windows.","status":"planned","dirty_reason":null,"characters":["the-guild"],"depends_on":[],"depended_by":[]}}' > /dev/null
+echo "--- Test 14: create target=beat injects beat-brief into prose file ---"
+mcp_call "create" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b01","label":"The guild arrives","summary":"The Guild marches into town at dawn. Banners flying, armor gleaming. The townsfolk watch from shuttered windows.","status":"planned","dirty_reason":null,"characters":["the-guild"],"depends_on":[],"depended_by":[]}}' > /dev/null
 
 T14_PASS=$(python3 -c "
 import sys
@@ -435,16 +436,16 @@ ok = has_marker and has_brief and has_summary
 print('true' if ok else 'false|marker=' + str(has_marker) + ' brief=' + str(has_brief) + ' summary=' + str(has_summary))
 ")
 if [ "$(echo "$T14_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 14 "add_beat injects beat-brief [PLANNED] into .md file" "true"
+  report 14 "create beat injects beat-brief [PLANNED] into .md file" "true"
 else
-  report 14 "add_beat injects beat-brief [PLANNED] into .md file" "false" "$(echo "$T14_PASS" | cut -d'|' -f2-)"
+  report 14 "create beat injects beat-brief [PLANNED] into .md file" "false" "$(echo "$T14_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 15: write_beat_prose preserves beat-brief, getBeatProse is clean
+# Test 15: write target=beat preserves beat-brief, getBeatProse is clean
 # =========================================================================
-echo "--- Test 15: write prose, verify .md has brief, beat read is clean ---"
-mcp_call "write_beat_prose" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b01","content":"The dust rose before the column did. Marguerite saw it first."}' > /dev/null
+echo "--- Test 15: write beat prose, verify .md has brief, beat read is clean ---"
+mcp_call "write" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b01","content":"The dust rose before the column did. Marguerite saw it first."}' > /dev/null
 
 # Check the .md on disk still has beat-brief
 T15A_PASS=$(python3 -c "
@@ -467,16 +468,16 @@ print('true' if (clean and has_content) else 'false|clean=' + str(clean) + ' con
 " <<< "$TEXT")
 
 if [ "$(echo "$T15A_PASS" | cut -d'|' -f1)" = "true" ] && [ "$(echo "$T15B_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 15 "write_beat_prose: .md has brief, getBeatProse is clean" "true"
+  report 15 "write beat: .md has brief, getBeatProse is clean" "true"
 else
-  report 15 "write_beat_prose: .md has brief, getBeatProse is clean" "false" "disk=$(echo "$T15A_PASS" | cut -d'|' -f2-) api=$(echo "$T15B_PASS" | cut -d'|' -f2-)"
+  report 15 "write beat: .md has brief, getBeatProse is clean" "false" "disk=$(echo "$T15A_PASS" | cut -d'|' -f2-) api=$(echo "$T15B_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 16: update_chapter_meta refreshes beat-brief status
+# Test 16: update target=chapter refreshes beat-brief status
 # =========================================================================
-echo "--- Test 16: update_chapter_meta refreshes beat-brief status ---"
-mcp_call "update_chapter_meta" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","patch":{"beats":[{"id":"b01","status":"written"}]}}' > /dev/null
+echo "--- Test 16: update chapter refreshes beat-brief status ---"
+mcp_call "update" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","patch":{"beats":[{"id":"b01","status":"written"}]}}' > /dev/null
 
 T16_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
@@ -485,16 +486,16 @@ no_planned = '[PLANNED]' not in md
 print('true' if (has_written and no_planned) else 'false|written=' + str(has_written) + ' no_planned=' + str(no_planned))
 ")
 if [ "$(echo "$T16_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 16 "update_chapter_meta refreshes beat-brief to [WRITTEN]" "true"
+  report 16 "update chapter refreshes beat-brief to [WRITTEN]" "true"
 else
-  report 16 "update_chapter_meta refreshes beat-brief to [WRITTEN]" "false" "$(echo "$T16_PASS" | cut -d'|' -f2-)"
+  report 16 "update chapter refreshes beat-brief to [WRITTEN]" "false" "$(echo "$T16_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 17: mark_node dirty updates beat-brief
+# Test 17: update target=node dirty updates beat-brief
 # =========================================================================
-echo "--- Test 17: mark_node dirty updates beat-brief ---"
-mcp_call "mark_node" '{"project":"_fractal-test","node_ref":"part-01/chapter-01:b01","status":"dirty","reason":"canon change: the-guild backstory revised"}' > /dev/null
+echo "--- Test 17: update node dirty updates beat-brief ---"
+mcp_call "update" '{"target":"node","project":"_fractal-test","node_ref":"part-01/chapter-01:b01","mark":"dirty","reason":"canon change: the-guild backstory revised"}' > /dev/null
 
 T17_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
@@ -503,16 +504,16 @@ no_written = '[WRITTEN]' not in md
 print('true' if (has_dirty and no_written) else 'false|dirty=' + str(has_dirty) + ' no_written=' + str(no_written))
 ")
 if [ "$(echo "$T17_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 17 "mark_node dirty updates beat-brief to [DIRTY: reason]" "true"
+  report 17 "update node dirty updates beat-brief to [DIRTY: reason]" "true"
 else
-  report 17 "mark_node dirty updates beat-brief to [DIRTY: reason]" "false" "$(echo "$T17_PASS" | cut -d'|' -f2-)"
+  report 17 "update node dirty updates beat-brief to [DIRTY: reason]" "false" "$(echo "$T17_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 18: edit_beat_prose preserves beat-brief
+# Test 18: edit target=beat preserves beat-brief
 # =========================================================================
-echo "--- Test 18: edit_beat_prose preserves beat-brief ---"
-mcp_call "edit_beat_prose" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b01","edits":[{"old_str":"Marguerite saw it first","new_str":"Marguerite noticed it first"}]}' > /dev/null
+echo "--- Test 18: edit beat preserves beat-brief ---"
+mcp_call "edit" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b01","edits":[{"old_str":"Marguerite saw it first","new_str":"Marguerite noticed it first"}]}' > /dev/null
 
 T18_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
@@ -521,16 +522,16 @@ has_edit = 'noticed it first' in md
 print('true' if (has_brief and has_edit) else 'false|brief=' + str(has_brief) + ' edit=' + str(has_edit))
 ")
 if [ "$(echo "$T18_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 18 "edit_beat_prose preserves beat-brief comment" "true"
+  report 18 "edit beat preserves beat-brief comment" "true"
 else
-  report 18 "edit_beat_prose preserves beat-brief comment" "false" "$(echo "$T18_PASS" | cut -d'|' -f2-)"
+  report 18 "edit beat preserves beat-brief comment" "false" "$(echo "$T18_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
 # Test 19: add second beat, reorder — briefs travel with beats
 # =========================================================================
 echo "--- Test 19: reorder_beats carries beat-brief comments ---"
-mcp_call "add_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b02","label":"The standoff","summary":"Unit 7 stands between the Guild and the bakery door. She does not move.","status":"planned","dirty_reason":null,"characters":["unit-7","the-guild"],"depends_on":[],"depended_by":[]}}' > /dev/null
+mcp_call "create" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b02","label":"The standoff","summary":"Unit 7 stands between the Guild and the bakery door. She does not move.","status":"planned","dirty_reason":null,"characters":["unit-7","the-guild"],"depends_on":[],"depended_by":[]}}' > /dev/null
 
 mcp_call "reorder_beats" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_order":["b02","b01"]}' > /dev/null
 
@@ -587,7 +588,7 @@ fi
 # Test 22: summary truncation for long summaries
 # =========================================================================
 echo "--- Test 22: long summary gets truncated in beat-brief ---"
-mcp_call "add_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b03","label":"The long speech","summary":"This is a very long beat summary that goes on and on about many things. It describes in great detail everything that happens in this particular beat of the story. The characters do things, say things, and experience things. There are descriptions of the setting, the mood, the weather, and the general atmosphere. This continues for quite a while because we want to test that the truncation logic works properly when the summary exceeds the maximum length allowed.","status":"planned","dirty_reason":null,"characters":[],"depends_on":[],"depended_by":[]}}' > /dev/null
+mcp_call "create" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b03","label":"The long speech","summary":"This is a very long beat summary that goes on and on about many things. It describes in great detail everything that happens in this particular beat of the story. The characters do things, say things, and experience things. There are descriptions of the setting, the mood, the weather, and the general atmosphere. This continues for quite a while because we want to test that the truncation logic works properly when the summary exceeds the maximum length allowed.","status":"planned","dirty_reason":null,"characters":[],"depends_on":[],"depended_by":[]}}' > /dev/null
 
 T22_PASS=$(python3 -c "
 import re
@@ -607,10 +608,10 @@ else
 fi
 
 # =========================================================================
-# Test 23: remove_beat also removes its beat-brief
+# Test 23: remove target=beat also removes its beat-brief
 # =========================================================================
-echo "--- Test 23: remove_beat removes beat-brief ---"
-mcp_call "remove_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b03"}' > /dev/null
+echo "--- Test 23: remove beat removes beat-brief ---"
+mcp_call "remove" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b03"}' > /dev/null
 
 T23_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
@@ -619,16 +620,16 @@ no_brief = 'beat-brief:b03' not in md
 print('true' if (no_marker and no_brief) else 'false|marker_gone=' + str(no_marker) + ' brief_gone=' + str(no_brief))
 ")
 if [ "$(echo "$T23_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 23 "remove_beat removes both beat marker and beat-brief" "true"
+  report 23 "remove beat removes both beat marker and beat-brief" "true"
 else
-  report 23 "remove_beat removes both beat marker and beat-brief" "false" "$(echo "$T23_PASS" | cut -d'|' -f2-)"
+  report 23 "remove beat removes both beat marker and beat-brief" "false" "$(echo "$T23_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 24: create_chapter with summary → chapter-brief appears
+# Test 24: create chapter with summary → chapter-brief appears
 # =========================================================================
-echo "--- Test 24: create_chapter with summary injects chapter-brief ---"
-mcp_call "create_chapter" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","title":"The Market","summary":"Unit 7 visits the morning market and discovers a coded message."}' > /dev/null
+echo "--- Test 24: create chapter with summary injects chapter-brief ---"
+mcp_call "create" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","title":"The Market","summary":"Unit 7 visits the morning market and discovers a coded message."}' > /dev/null
 
 T24_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
@@ -640,15 +641,15 @@ ok = has_heading and has_brief and has_summary and has_close
 print('true' if ok else 'false|heading=' + str(has_heading) + ' brief=' + str(has_brief) + ' summary=' + str(has_summary) + ' close=' + str(has_close))
 ")
 if [ "$(echo "$T24_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 24 "create_chapter with summary injects chapter-brief [PLANNING]" "true"
+  report 24 "create chapter with summary injects chapter-brief [PLANNING]" "true"
 else
-  report 24 "create_chapter with summary injects chapter-brief [PLANNING]" "false" "$(echo "$T24_PASS" | cut -d'|' -f2-)"
+  report 24 "create chapter with summary injects chapter-brief [PLANNING]" "false" "$(echo "$T24_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 25: create_chapter without summary → no chapter-brief
+# Test 25: create chapter without summary → no chapter-brief
 # =========================================================================
-echo "--- Test 25: create_chapter without summary → no chapter-brief ---"
+echo "--- Test 25: create chapter without summary → no chapter-brief ---"
 T25_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
 no_brief = 'chapter-brief' not in md
@@ -664,7 +665,7 @@ fi
 # Test 26: chapter-brief coexists with beat-briefs
 # =========================================================================
 echo "--- Test 26: chapter-brief coexists with beat-briefs ---"
-mcp_call "add_beat" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","beat":{"id":"b01","label":"Arriving at market","summary":"Unit 7 enters through the east gate. Vendors call out prices.","status":"planned","dirty_reason":null,"characters":["unit-7"],"depends_on":[],"depended_by":[]}}' > /dev/null
+mcp_call "create" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","beat":{"id":"b01","label":"Arriving at market","summary":"Unit 7 enters through the east gate. Vendors call out prices.","status":"planned","dirty_reason":null,"characters":["unit-7"],"depends_on":[],"depended_by":[]}}' > /dev/null
 
 T26_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
@@ -685,10 +686,10 @@ else
 fi
 
 # =========================================================================
-# Test 27: update_chapter_meta summary → chapter-brief injected
+# Test 27: update chapter summary → chapter-brief updated
 # =========================================================================
-echo "--- Test 27: update_chapter_meta with summary updates chapter-brief ---"
-mcp_call "update_chapter_meta" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"summary":"Unit 7 visits the morning market and finds a hidden cipher."}}' > /dev/null
+echo "--- Test 27: update chapter with summary updates chapter-brief ---"
+mcp_call "update" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"summary":"Unit 7 visits the morning market and finds a hidden cipher."}}' > /dev/null
 
 T27_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
@@ -699,16 +700,16 @@ ok = has_new_summary and no_old_summary and has_brief
 print('true' if ok else 'false|new=' + str(has_new_summary) + ' no_old=' + str(no_old_summary) + ' brief=' + str(has_brief))
 ")
 if [ "$(echo "$T27_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 27 "update_chapter_meta summary refreshes chapter-brief" "true"
+  report 27 "update chapter summary refreshes chapter-brief" "true"
 else
-  report 27 "update_chapter_meta summary refreshes chapter-brief" "false" "$(echo "$T27_PASS" | cut -d'|' -f2-)"
+  report 27 "update chapter summary refreshes chapter-brief" "false" "$(echo "$T27_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
 # Test 28: status change updates chapter-brief status tag
 # =========================================================================
 echo "--- Test 28: status change updates chapter-brief tag ---"
-mcp_call "update_chapter_meta" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"status":"dirty","dirty_reason":"canon revision"}}' > /dev/null
+mcp_call "update" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"status":"dirty","dirty_reason":"canon revision"}}' > /dev/null
 
 T28_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
@@ -727,7 +728,7 @@ fi
 # Test 29: refresh_summaries updates both chapter-brief and beat-briefs
 # =========================================================================
 echo "--- Test 29: refresh_summaries covers chapter-brief + beat-briefs ---"
-mcp_call "update_chapter_meta" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"status":"written","dirty_reason":null}}' > /dev/null
+mcp_call "update" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"status":"written","dirty_reason":null}}' > /dev/null
 RESULT=$(mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02"}')
 TEXT=$(extract_text "$RESULT")
 
@@ -784,7 +785,7 @@ else
 fi
 
 # =========================================================================
-# Test 32: @eaDir inside parts/ invisible to search
+# Test 32: @eaDir inside parts/ invisible to search (via get_context)
 # =========================================================================
 echo "--- Test 32: @eaDir inside parts/ invisible to search ---"
 mkdir -p "$TEST_DIR/parts/@eaDir"
@@ -793,20 +794,22 @@ cat > "$TEST_DIR/parts/@eaDir/junk.md" <<'EADIR_MD'
 This contains the word guild for search matching.
 EADIR_MD
 
-RESULT=$(mcp_call "search" '{"project":"_fractal-test","query":"guild"}')
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"search":{"query":"guild"}}}')
 TEXT=$(extract_text "$RESULT")
 T32_PASS=$(python3 -c "
-import sys
-text = sys.stdin.read()
-ok = '@eaDir' not in text
-print('true' if ok else 'false|@eaDir found in search results: ' + repr(text[:300]))
+import json, sys
+d = json.loads(sys.stdin.read())
+search = d.get('search', {})
+results_str = str(search.get('results', []))
+ok = '@eaDir' not in results_str
+print('true' if ok else 'false|@eaDir found in search results: ' + repr(results_str[:300]))
 " <<< "$TEXT")
 rm -rf "$TEST_DIR/parts/@eaDir"
 
 if [ "$(echo "$T32_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 32 "@eaDir inside parts/ invisible to search" "true"
+  report 32 "@eaDir inside parts/ invisible to search (via get_context)" "true"
 else
-  report 32 "@eaDir inside parts/ invisible to search" "false" "$(echo "$T32_PASS" | cut -d'|' -f2-)"
+  report 32 "@eaDir inside parts/ invisible to search (via get_context)" "false" "$(echo "$T32_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
@@ -835,8 +838,8 @@ fi
 # =========================================================================
 # Test 34: Flat canon still works (existing behavior)
 # =========================================================================
-echo "--- Test 34: flat canon update + get_context ---"
-mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"flat-char","content":"# Flat Character\n\nA simple character entry."}' > /dev/null
+echo "--- Test 34: flat canon write + get_context ---"
+mcp_call "write" '{"target":"canon","project":"_fractal-test","type":"characters","id":"flat-char","content":"# Flat Character\n\nA simple character entry."}' > /dev/null
 RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["flat-char"]}}')
 TEXT=$(extract_text "$RESULT")
 T34_PASS=$(python3 -c "
@@ -844,176 +847,23 @@ import json, sys
 d = json.loads(sys.stdin.read())
 entry = d.get('canon', {}).get('flat-char', {})
 content = entry.get('content', '')
-ext = entry.get('extended_files', [])
-ok = '# Flat Character' in content and ext == []
-print('true' if ok else 'false|content=' + repr(content[:100]) + ' ext=' + str(ext))
+ok = '# Flat Character' in content and 'simple character' in content
+print('true' if ok else 'false|content=' + repr(content[:100]))
 " <<< "$TEXT")
 if [ "$(echo "$T34_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 34 "flat canon: update_canon + get_context returns extended_files=[]" "true"
+  report 34 "flat canon: write + get_context returns correct content" "true"
 else
-  report 34 "flat canon: update_canon + get_context returns extended_files=[]" "false" "$(echo "$T34_PASS" | cut -d'|' -f2-)"
+  report 34 "flat canon: write + get_context returns correct content" "false" "$(echo "$T34_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 35: Extended write auto-migrates flat entry to directory
+# Test 35: Canon entry with ## sections → returns sections array + top-matter only
 # =========================================================================
-echo "--- Test 35: extended write auto-migrates flat to directory ---"
-RESULT=$(mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"flat-char","content":"# Voice Samples\n\nDialogue examples for flat-char.","extended_id":"voice-samples"}')
-ERR=$(is_error "$RESULT")
-if [ "$ERR" = "true" ]; then
-  report 35 "extended write auto-migrates" "false" "Tool error: $(extract_text "$RESULT")"
-else
-  T35_PASS="true"
-  T35_DETAIL=""
-
-  # Flat file should be gone
-  [ -f "$TEST_DIR/canon/characters/flat-char.md" ] && T35_PASS="false" && T35_DETAIL="flat-char.md still exists;"
-  # Directory should exist
-  [ ! -d "$TEST_DIR/canon/characters/flat-char" ] && T35_PASS="false" && T35_DETAIL="$T35_DETAIL flat-char/ dir missing;"
-  # brief.md should exist
-  [ ! -f "$TEST_DIR/canon/characters/flat-char/brief.md" ] && T35_PASS="false" && T35_DETAIL="$T35_DETAIL brief.md missing;"
-  # voice-samples.md should exist
-  [ ! -f "$TEST_DIR/canon/characters/flat-char/voice-samples.md" ] && T35_PASS="false" && T35_DETAIL="$T35_DETAIL voice-samples.md missing;"
-
-  # Check brief content preserved original content
-  if [ -f "$TEST_DIR/canon/characters/flat-char/brief.md" ]; then
-    BRIEF_HAS_ORIGINAL=$(python3 -c "
-content = open('$TEST_DIR/canon/characters/flat-char/brief.md').read()
-print('true' if '# Flat Character' in content else 'false')
-")
-    [ "$BRIEF_HAS_ORIGINAL" != "true" ] && T35_PASS="false" && T35_DETAIL="$T35_DETAIL brief.md lost original content;"
-  fi
-
-  report 35 "extended write auto-migrates flat to directory" "$T35_PASS" "$T35_DETAIL"
-fi
-
-# =========================================================================
-# Test 36: get_context returns extended_files for directory entry
-# =========================================================================
-echo "--- Test 36: get_context returns extended_files after migration ---"
-RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["flat-char"]}}')
-TEXT=$(extract_text "$RESULT")
-T36_PASS=$(python3 -c "
-import json, sys
-d = json.loads(sys.stdin.read())
-entry = d.get('canon', {}).get('flat-char', {})
-ext = entry.get('extended_files', [])
-content = entry.get('content', '')
-ok = 'voice-samples' in ext and '# Flat Character' in content
-print('true' if ok else 'false|ext=' + str(ext) + ' content=' + repr(content[:100]))
-" <<< "$TEXT")
-if [ "$(echo "$T36_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 36 "get_context returns extended_files=[voice-samples] for directory entry" "true"
-else
-  report 36 "get_context returns extended_files=[voice-samples] for directory entry" "false" "$(echo "$T36_PASS" | cut -d'|' -f2-)"
-fi
-
-# =========================================================================
-# Test 37: Path notation loads extended file
-# =========================================================================
-echo "--- Test 37: path notation loads extended file ---"
-RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["flat-char/voice-samples"]}}')
-TEXT=$(extract_text "$RESULT")
-T37_PASS=$(python3 -c "
-import json, sys
-d = json.loads(sys.stdin.read())
-entry = d.get('canon', {}).get('flat-char/voice-samples', {})
-content = entry.get('content', '')
-ok = 'Voice Samples' in content and 'Dialogue examples' in content
-print('true' if ok else 'false|content=' + repr(content[:200]))
-" <<< "$TEXT")
-if [ "$(echo "$T37_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 37 "path notation loads extended file content" "true"
-else
-  report 37 "path notation loads extended file content" "false" "$(echo "$T37_PASS" | cut -d'|' -f2-)"
-fi
-
-# =========================================================================
-# Test 38: Brief-only load doesn't include extended content
-# =========================================================================
-echo "--- Test 38: brief-only load excludes extended content ---"
-RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["flat-char"]}}')
-TEXT=$(extract_text "$RESULT")
-T38_PASS=$(python3 -c "
-import json, sys
-d = json.loads(sys.stdin.read())
-entry = d.get('canon', {}).get('flat-char', {})
-content = entry.get('content', '')
-ok = 'Dialogue examples' not in content and '# Flat Character' in content
-print('true' if ok else 'false|has_extended_content=' + str('Dialogue examples' in content))
-" <<< "$TEXT")
-if [ "$(echo "$T38_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 38 "brief-only load excludes extended file content" "true"
-else
-  report 38 "brief-only load excludes extended file content" "false" "$(echo "$T38_PASS" | cut -d'|' -f2-)"
-fi
-
-# =========================================================================
-# Test 39: listCanon finds both flat and directory entries
-# =========================================================================
-echo "--- Test 39: listCanon finds both flat and directory entries ---"
-# flat-char is now directory, the-guild is flat in factions. Create a flat character for comparison
-mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"flat-only","content":"# Flat Only\n\nStays flat."}' > /dev/null
-RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon_list":"characters"}}')
-TEXT=$(extract_text "$RESULT")
-T39_PASS=$(python3 -c "
-import json, sys
-d = json.loads(sys.stdin.read())
-entries = d.get('canon_list', [])
-has_flat = 'flat-only' in entries
-has_dir = 'flat-char' in entries
-ok = has_flat and has_dir
-print('true' if ok else 'false|entries=' + str(entries) + ' flat=' + str(has_flat) + ' dir=' + str(has_dir))
-" <<< "$TEXT")
-if [ "$(echo "$T39_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 39 "listCanon finds both flat and directory entries" "true"
-else
-  report 39 "listCanon finds both flat and directory entries" "false" "$(echo "$T39_PASS" | cut -d'|' -f2-)"
-fi
-
-# =========================================================================
-# Test 40: Direct directory creation (update_canon with extended_id on new entry)
-# =========================================================================
-echo "--- Test 40: direct directory creation ---"
-RESULT=$(mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"new-dir-char","content":"# New Dir Brief\n\nCreated directly as directory.","extended_id":"backstory"}')
-ERR=$(is_error "$RESULT")
-if [ "$ERR" = "true" ]; then
-  report 40 "direct directory creation" "false" "Tool error: $(extract_text "$RESULT")"
-else
-  T40_PASS="true"
-  T40_DETAIL=""
-  [ ! -d "$TEST_DIR/canon/characters/new-dir-char" ] && T40_PASS="false" && T40_DETAIL="dir missing;"
-  [ ! -f "$TEST_DIR/canon/characters/new-dir-char/brief.md" ] && T40_PASS="false" && T40_DETAIL="$T40_DETAIL brief.md missing;"
-  [ ! -f "$TEST_DIR/canon/characters/new-dir-char/backstory.md" ] && T40_PASS="false" && T40_DETAIL="$T40_DETAIL backstory.md missing;"
-  report 40 "direct directory creation (new entry with extended_id)" "$T40_PASS" "$T40_DETAIL"
-fi
-
-# =========================================================================
-# Test 41: search finds content in extended files
-# =========================================================================
-echo "--- Test 41: search finds extended file content ---"
-RESULT=$(mcp_call "search" '{"project":"_fractal-test","query":"Dialogue examples","scope":"canon"}')
-TEXT=$(extract_text "$RESULT")
-T41_PASS=$(python3 -c "
-import sys
-text = sys.stdin.read()
-ok = 'voice-samples' in text and 'Dialogue examples' in text
-print('true' if ok else 'false|' + repr(text[:300]))
-" <<< "$TEXT")
-if [ "$(echo "$T41_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 41 "search finds content in extended files" "true"
-else
-  report 41 "search finds content in extended files" "false" "$(echo "$T41_PASS" | cut -d'|' -f2-)"
-fi
-
-# =========================================================================
-# Test 42: Canon entry with ## sections → returns sections array + top-matter only
-# =========================================================================
-echo "--- Test 42: canon entry returns sections TOC and top-matter ---"
-mcp_call "update_canon" '{"project":"_fractal-test","type":"characters","id":"sectioned-char","content":"# Sectioned Character\n\nTop-matter summary line.\n\n## Core\n\n- Age: 30\n- Role: Tester\n\n## Voice & Personality\n\n- Dry wit, short sentences\n- Never uses metaphor\n\n## Arc Summary\n\nGoes from doubt to confidence."}' > /dev/null
+echo "--- Test 35: canon entry returns sections TOC and top-matter ---"
+mcp_call "write" '{"target":"canon","project":"_fractal-test","type":"characters","id":"sectioned-char","content":"# Sectioned Character\n\nTop-matter summary line.\n\n## Core\n\n- Age: 30\n- Role: Tester\n\n## Voice & Personality\n\n- Dry wit, short sentences\n- Never uses metaphor\n\n## Arc Summary\n\nGoes from doubt to confidence."}' > /dev/null
 RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["sectioned-char"]}}')
 TEXT=$(extract_text "$RESULT")
-T42_PASS=$(python3 -c "
+T35_PASS=$(python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
 entry = d.get('canon', {}).get('sectioned-char', {})
@@ -1028,19 +878,19 @@ ids_ok = section_ids == ['core', 'voice--personality', 'arc-summary'] or section
 ok = has_top and no_section_content and has_sections and ids_ok
 print('true' if ok else 'false|content=' + repr(content[:200]) + ' sections=' + str(sections) + ' ids=' + str(section_ids))
 " <<< "$TEXT")
-if [ "$(echo "$T42_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 42 "canon entry returns sections TOC + top-matter only" "true"
+if [ "$(echo "$T35_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 35 "canon entry returns sections TOC + top-matter only" "true"
 else
-  report 42 "canon entry returns sections TOC + top-matter only" "false" "$(echo "$T42_PASS" | cut -d'|' -f2-)"
+  report 35 "canon entry returns sections TOC + top-matter only" "false" "$(echo "$T35_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 43: Fetch specific canon section via # notation
+# Test 36: Fetch specific canon section via # notation
 # =========================================================================
-echo "--- Test 43: fetch canon section via # notation ---"
+echo "--- Test 36: fetch canon section via # notation ---"
 RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["sectioned-char#voice-personality"]}}')
 TEXT=$(extract_text "$RESULT")
-T43_PASS=$(python3 -c "
+T36_PASS=$(python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
 entry = d.get('canon', {}).get('sectioned-char#voice-personality', {})
@@ -1051,19 +901,19 @@ no_other = '## Core' not in content and '## Arc' not in content
 ok = has_header and has_detail and no_other
 print('true' if ok else 'false|content=' + repr(content[:300]))
 " <<< "$TEXT")
-if [ "$(echo "$T43_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 43 "# notation returns specific section content" "true"
+if [ "$(echo "$T36_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 36 "# notation returns specific section content" "true"
 else
-  report 43 "# notation returns specific section content" "false" "$(echo "$T43_PASS" | cut -d'|' -f2-)"
+  report 36 "# notation returns specific section content" "false" "$(echo "$T36_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 44: Batch fetch multiple sections
+# Test 37: Batch fetch multiple sections
 # =========================================================================
-echo "--- Test 44: batch fetch multiple sections ---"
+echo "--- Test 37: batch fetch multiple sections ---"
 RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["sectioned-char#core","sectioned-char#arc-summary"]}}')
 TEXT=$(extract_text "$RESULT")
-T44_PASS=$(python3 -c "
+T37_PASS=$(python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
 canon = d.get('canon', {})
@@ -1074,19 +924,19 @@ arc_ok = '## Arc Summary' in canon.get('sectioned-char#arc-summary', {}).get('co
 ok = has_core and has_arc and core_ok and arc_ok
 print('true' if ok else 'false|has_core=' + str(has_core) + ' has_arc=' + str(has_arc) + ' core_ok=' + str(core_ok) + ' arc_ok=' + str(arc_ok))
 " <<< "$TEXT")
-if [ "$(echo "$T44_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 44 "batch fetch multiple sections via # notation" "true"
+if [ "$(echo "$T37_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 37 "batch fetch multiple sections via # notation" "true"
 else
-  report 44 "batch fetch multiple sections via # notation" "false" "$(echo "$T44_PASS" | cut -d'|' -f2-)"
+  report 37 "batch fetch multiple sections via # notation" "false" "$(echo "$T37_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 45: Nonexistent section returns error with available sections list
+# Test 38: Nonexistent section returns error with available sections list
 # =========================================================================
-echo "--- Test 45: nonexistent section returns helpful error ---"
+echo "--- Test 38: nonexistent section returns helpful error ---"
 RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["sectioned-char#nonexistent"]}}')
 TEXT=$(extract_text "$RESULT")
-T45_PASS=$(python3 -c "
+T38_PASS=$(python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
 errors = d.get('errors', {})
@@ -1097,19 +947,19 @@ mentions_available = 'core' in err_msg and 'voice-personality' in err_msg
 ok = has_error and mentions_available
 print('true' if ok else 'false|errors=' + str(errors))
 " <<< "$TEXT")
-if [ "$(echo "$T45_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 45 "nonexistent section returns error listing available sections" "true"
+if [ "$(echo "$T38_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 38 "nonexistent section returns error listing available sections" "true"
 else
-  report 45 "nonexistent section returns error listing available sections" "false" "$(echo "$T45_PASS" | cut -d'|' -f2-)"
+  report 38 "nonexistent section returns error listing available sections" "false" "$(echo "$T38_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 46: Canon entry without ## headers returns full content (backward compat)
+# Test 39: Canon entry without ## headers returns full content (backward compat)
 # =========================================================================
-echo "--- Test 46: canon without ## headers returns full content ---"
+echo "--- Test 39: canon without ## headers returns full content ---"
 RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["the-guild"]}}')
 TEXT=$(extract_text "$RESULT")
-T46_PASS=$(python3 -c "
+T39_PASS=$(python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
 entry = d.get('canon', {}).get('the-guild', {})
@@ -1118,10 +968,151 @@ sections = entry.get('sections', [])
 ok = '# The Guild' in content and 'powerful faction' in content and sections == []
 print('true' if ok else 'false|content=' + repr(content[:200]) + ' sections=' + str(sections))
 " <<< "$TEXT")
-if [ "$(echo "$T46_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 46 "canon without ## headers returns full content, sections=[]" "true"
+if [ "$(echo "$T39_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 39 "canon without ## headers returns full content, sections=[]" "true"
 else
-  report 46 "canon without ## headers returns full content, sections=[]" "false" "$(echo "$T46_PASS" | cut -d'|' -f2-)"
+  report 39 "canon without ## headers returns full content, sections=[]" "false" "$(echo "$T39_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 40: edit target=canon — basic single edit
+# =========================================================================
+echo "--- Test 40: edit canon basic single edit ---"
+RESULT=$(mcp_call "edit" '{"target":"canon","project":"_fractal-test","type":"factions","id":"the-guild","edits":[{"old_str":"A powerful faction.","new_str":"A powerful and ancient faction."}]}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 40 "edit canon basic single edit" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  TEXT=$(extract_text "$RESULT")
+  T40_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+ok = d.get('edits_applied') == 1
+print('true' if ok else 'false|edits_applied=' + str(d.get('edits_applied')))
+" <<< "$TEXT")
+
+  # Verify on disk
+  T40_DISK=$(python3 -c "
+content = open('$TEST_DIR/canon/factions/the-guild.md').read()
+ok = 'powerful and ancient faction' in content and 'A powerful faction.' not in content
+print('true' if ok else 'false|content=' + repr(content[:200]))
+")
+
+  if [ "$(echo "$T40_PASS" | cut -d'|' -f1)" = "true" ] && [ "$(echo "$T40_DISK" | cut -d'|' -f1)" = "true" ]; then
+    report 40 "edit canon basic single edit" "true"
+  else
+    report 40 "edit canon basic single edit" "false" "api=$(echo "$T40_PASS" | cut -d'|' -f2-) disk=$(echo "$T40_DISK" | cut -d'|' -f2-)"
+  fi
+fi
+
+# =========================================================================
+# Test 41: edit target=canon — multiple ordered edits
+# =========================================================================
+echo "--- Test 41: edit canon multiple edits ---"
+RESULT=$(mcp_call "edit" '{"target":"canon","project":"_fractal-test","type":"factions","id":"the-guild","edits":[{"old_str":"# The Guild","new_str":"# The Grand Guild"},{"old_str":"powerful and ancient","new_str":"mighty and ancient"}]}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 41 "edit canon multiple edits" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  TEXT=$(extract_text "$RESULT")
+  T41_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+ok = d.get('edits_applied') == 2
+print('true' if ok else 'false|edits_applied=' + str(d.get('edits_applied')))
+" <<< "$TEXT")
+
+  T41_DISK=$(python3 -c "
+content = open('$TEST_DIR/canon/factions/the-guild.md').read()
+ok = '# The Grand Guild' in content and 'mighty and ancient' in content
+print('true' if ok else 'false|content=' + repr(content[:200]))
+")
+
+  if [ "$(echo "$T41_PASS" | cut -d'|' -f1)" = "true" ] && [ "$(echo "$T41_DISK" | cut -d'|' -f1)" = "true" ]; then
+    report 41 "edit canon multiple edits applied in order" "true"
+  else
+    report 41 "edit canon multiple edits applied in order" "false" "api=$(echo "$T41_PASS" | cut -d'|' -f2-) disk=$(echo "$T41_DISK" | cut -d'|' -f2-)"
+  fi
+fi
+
+# =========================================================================
+# Test 42: edit target=canon — rejects duplicate matches
+# =========================================================================
+echo "--- Test 42: edit canon rejects duplicate match ---"
+# First create an entry with duplicate text
+mcp_call "write" '{"target":"canon","project":"_fractal-test","type":"factions","id":"dup-test","content":"# Dup Test\n\nThe word apple appears here. And apple appears again."}' > /dev/null
+RESULT=$(mcp_call "edit" '{"target":"canon","project":"_fractal-test","type":"factions","id":"dup-test","edits":[{"old_str":"apple","new_str":"orange"}]}')
+ERR=$(is_error "$RESULT")
+TEXT=$(extract_text "$RESULT")
+T42_PASS=$(python3 -c "
+import sys
+text = sys.stdin.read()
+ok = 'matches 2 locations' in text or 'matches' in text.lower()
+print('true' if ok else 'false|response=' + repr(text[:300]))
+" <<< "$TEXT")
+if [ "$(echo "$T42_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 42 "edit canon rejects duplicate match with helpful error" "true"
+else
+  report 42 "edit canon rejects duplicate match with helpful error" "false" "$(echo "$T42_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 43: edit target=canon — rejects missing match
+# =========================================================================
+echo "--- Test 43: edit canon rejects missing match ---"
+RESULT=$(mcp_call "edit" '{"target":"canon","project":"_fractal-test","type":"factions","id":"the-guild","edits":[{"old_str":"this text does not exist anywhere","new_str":"replacement"}]}')
+ERR=$(is_error "$RESULT")
+TEXT=$(extract_text "$RESULT")
+T43_PASS=$(python3 -c "
+import sys
+text = sys.stdin.read()
+ok = 'No match' in text or 'no match' in text.lower()
+print('true' if ok else 'false|response=' + repr(text[:300]))
+" <<< "$TEXT")
+if [ "$(echo "$T43_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 43 "edit canon rejects missing match with helpful error" "true"
+else
+  report 43 "edit canon rejects missing match with helpful error" "false" "$(echo "$T43_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 44: search via get_context include.search
+# =========================================================================
+echo "--- Test 44: search via get_context include.search ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"search":{"query":"dust rose","scope":"prose"}}}')
+TEXT=$(extract_text "$RESULT")
+T44_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+search = d.get('search', {})
+results = search.get('results', [])
+total = search.get('total', 0)
+ok = total > 0 and any('dust rose' in r for r in results)
+print('true' if ok else 'false|total=' + str(total) + ' results=' + str(results[:2]))
+" <<< "$TEXT")
+if [ "$(echo "$T44_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 44 "search via get_context include.search finds prose" "true"
+else
+  report 44 "search via get_context include.search finds prose" "false" "$(echo "$T44_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 45: search with no results
+# =========================================================================
+echo "--- Test 45: search with no results returns message ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"search":{"query":"zzz_nonexistent_zzz"}}}')
+TEXT=$(extract_text "$RESULT")
+T45_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+search = d.get('search', {})
+ok = len(search.get('results', [])) == 0 and 'No results' in search.get('message', '')
+print('true' if ok else 'false|search=' + str(search))
+" <<< "$TEXT")
+if [ "$(echo "$T45_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 45 "search with no results returns empty results + message" "true"
+else
+  report 45 "search with no results returns empty results + message" "false" "$(echo "$T45_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================

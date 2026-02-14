@@ -8,7 +8,7 @@
  *   Claude.ai  -->  HTTPS (reverse proxy)  -->  HTTP (this server, port 3001)
  *
  * Supports multiple independent projects under FRACTAL_PROJECTS_ROOT.
- * Every tool (except list_projects and list_templates) takes a `project` parameter.
+ * Every tool (except list_projects and template list/get/save) takes a `project` parameter.
  * Each project has its own git repo with automatic commits on writes.
  */
 
@@ -176,6 +176,16 @@ function jsonResult(data: unknown) {
   return textResult(JSON.stringify(data, null, 2));
 }
 
+async function commitFiles(root: string, paths: string[], message: string): Promise<void> {
+  const files = paths.map((p) => p.startsWith(root) ? p.slice(root.length + 1) : p);
+  try {
+    await autoCommit(root, files, message);
+  } catch (err) {
+    console.error(`[git-warning] Auto-commit failed for "${message}":`,
+      err instanceof Error ? err.message : err);
+  }
+}
+
 async function withCommit<T extends store.WriteResult | store.WriteResult[]>(
   root: string,
   fn: () => Promise<T>,
@@ -183,13 +193,7 @@ async function withCommit<T extends store.WriteResult | store.WriteResult[]>(
 ): Promise<T> {
   const result = await fn();
   const results = Array.isArray(result) ? result : [result];
-  const files = results.map((r) => r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path);
-  try {
-    await autoCommit(root, files, commitMessage);
-  } catch (err) {
-    console.error(`[git-warning] Auto-commit failed for "${commitMessage}":`,
-      err instanceof Error ? err.message : err);
-  }
+  await commitFiles(root, results.map((r) => r.path), commitMessage);
   return result;
 }
 
@@ -213,6 +217,14 @@ function logToolError(toolName: string, err: unknown) {
   console.error(`[tool-error] ${toolName}: ${message}`);
 }
 
+function requireArgs(args: Record<string, unknown>, fields: string[], context: string): void {
+  for (const field of fields) {
+    if (!args[field]) {
+      throw new Error(`${field} is required for ${context}`);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // MCP Server factory
 // ---------------------------------------------------------------------------
@@ -223,7 +235,7 @@ async function createMcpServer(): Promise<McpServer> {
 
   let projectLines: string;
   if (projects.length === 0) {
-    projectLines = "  (none — use create_project to start one)";
+    projectLines = "  (none — use create to start one)";
   } else {
     const lines: string[] = [];
     for (const p of projects) {
@@ -256,7 +268,7 @@ async function createMcpServer(): Promise<McpServer> {
   const instructions = [
     "Fractal is a structured narrative authoring server.",
     "Use get_context as the primary read tool — it returns any combination of project data in one call.",
-    "All tools except list_projects and list_templates require a 'project' parameter.",
+    "All tools except list_projects and template (list/get/save actions) require a 'project' parameter.",
     "",
     "Summary comments: Each chapter .md has a chapter-brief comment (<!-- chapter-brief [STATUS] ... -->) after the heading " +
     "showing the chapter's status and truncated summary, plus beat-brief comments (<!-- beat-brief:ID [STATUS] ... -->) for each beat. " +
@@ -269,12 +281,10 @@ async function createMcpServer(): Promise<McpServer> {
     "Navigation data for the tool. Never put writing-relevant content (personality, voice, appearance, arc, constraints) only in meta. " +
     "Rule of thumb: if a human writing a scene would need it, it goes in the markdown. If only the tool needs it to answer 'where does X appear?', it goes in meta.",
     "",
-    "Canon loading: Canon entries return a brief (lean working state) plus an `extended_files` listing. " +
-    "The brief is the working state — identity, voice, current state, goals, key dynamics. Enough for most scenes. " +
-    "Only load extended files (e.g. 'elena/voice-samples') when the scene specifically needs that depth: " +
-    "writing dialogue that needs voice calibration, a scene that hinges on backstory details, " +
-    "or resolving a relationship dynamic that the brief only sketches. " +
-    "Never bulk-load all extended files.",
+    "Canon loading: Canon entries use ## sections for organization. " +
+    "When sections exist, get_context returns only the top-matter (summary) plus a sections TOC. " +
+    "Fetch specific sections on demand via # notation (e.g. 'emmy#voice-personality'). " +
+    "This keeps context lean — load only the sections you need for the current scene.",
     "",
     "Current projects:",
     projectLines,
@@ -285,7 +295,9 @@ async function createMcpServer(): Promise<McpServer> {
     { instructions },
   );
 
-  // ===== PROJECT MANAGEMENT =====
+  // =========================================================================
+  // list_projects — standalone entry point
+  // =========================================================================
 
   server.registerTool("list_projects", {
     title: "List Projects",
@@ -294,7 +306,7 @@ async function createMcpServer(): Promise<McpServer> {
   }, async () => {
     const projects = await store.listProjects();
     if (projects.length === 0) {
-      return textResult("No projects found. Use create_project to start one.");
+      return textResult("No projects found. Use create to start one.");
     }
 
     const enriched = await Promise.all(projects.map(async (p) => {
@@ -321,212 +333,88 @@ async function createMcpServer(): Promise<McpServer> {
     return jsonResult(enriched);
   });
 
-  server.registerTool("create_project", {
-    title: "Create Project",
-    description:
-      "Bootstrap a new empty project with all required directories and starter files, plus git init. " +
-      "Optionally pass a template to configure canon types and project guide. " +
-      "Use list_templates to see available templates. Without a template, defaults to characters + locations.",
-    inputSchema: {
-      project: projectParam,
-      title: z.string().describe("Display title for the project"),
-      template: z.string().optional().describe(
-        "Template ID for project setup, e.g. 'fiction-default', 'worldbuilding', 'litrpg', 'fanfic'. " +
-        "Use list_templates to see available options. If omitted, uses default (characters + locations)."
-      ),
-    },
-  }, async ({ project, title, template: templateId }) => {
-    logToolCall("create_project", { project, title, template: templateId });
-    try {
-      let tmpl: store.ProjectTemplate | undefined;
-      if (templateId) {
-        tmpl = await store.loadTemplate(templateId);
-      }
-      const root = await store.ensureProjectStructure(project, title, tmpl);
-      await ensureGitRepo(root);
-      return jsonResult({
-        project,
-        root,
-        template: templateId ?? "default",
-        description: `Created project "${title}" at ${root}`,
-      });
-    } catch (err) {
-      logToolError("create_project", err);
-      throw err;
-    }
-  });
+  // =========================================================================
+  // template — consolidated from list/get/update/apply_template
+  // =========================================================================
 
-  server.registerTool("list_templates", {
-    title: "List Templates",
+  server.registerTool("template", {
+    title: "Template",
     description:
-      "List available project templates. Templates define which canon types " +
-      "(characters, locations, factions, systems, etc.) a project starts with.",
-    inputSchema: {},
-  }, async () => {
-    const templates = await store.listTemplates();
-    if (templates.length === 0) {
-      return textResult("No templates found. Projects will use the default setup (characters + locations).");
-    }
-    return jsonResult(templates);
-  });
-
-  server.registerTool("get_template", {
-    title: "Get Template",
-    description:
-      "Returns the full contents of a project template — canon types, themes, " +
-      "and the guide text. Use this to consult a template's writing guidelines " +
-      "while working on a project.",
+      "Manage project templates. action='list' lists available templates. " +
+      "action='get' returns full template contents (canon types, themes, guide). " +
+      "action='save' creates or updates a template. " +
+      "action='apply' applies a template to an existing project (requires project param).",
     inputSchema: {
-      template_id: z.string().describe("Template ID, e.g. 'fiction-default', 'worldbuilding', 'litrpg', 'fanfic'. Use list_templates to see options."),
-    },
-  }, async ({ template_id }) => {
-    logToolCall("get_template", { template_id });
-    const template = await store.loadTemplate(template_id);
-    return jsonResult(template);
-  });
-
-  server.registerTool("update_template", {
-    title: "Update Template",
-    description:
-      "Create or update a project template. Provide the full template object — " +
-      "id, name, description, canon_types, themes, and guide. " +
-      "Changes take effect on the next create_project or apply_template call.",
-    inputSchema: {
-      template_id: z.string().describe("Template ID (used as filename, e.g. 'my-template')"),
-      name: z.string().describe("Display name, e.g. 'My Custom Template'"),
-      description: z.string().describe("One-line description of what this template is for"),
+      action: z.enum(["list", "get", "save", "apply"]).describe("Operation to perform"),
+      template_id: z.string().optional().describe("Template ID — required for get, save, apply"),
+      project: projectParam.optional().describe("Project identifier — required for apply only"),
+      name: z.string().optional().describe("Display name (save only)"),
+      description: z.string().optional().describe("One-line description (save only)"),
       canon_types: z.array(z.object({
         id: z.string().describe("Canon type ID, e.g. 'characters', 'factions'"),
         label: z.string().describe("Display label"),
         description: z.string().describe("What belongs in this canon type"),
-      })).describe("Canon types this template provides"),
-      themes: z.array(z.string()).optional().describe("Seed themes for projects using this template"),
-      guide: z.string().optional().describe("Markdown guide text — writing conventions, what to track per canon type"),
+      })).optional().describe("Canon types (save only)"),
+      themes: z.array(z.string()).optional().describe("Seed themes (save only)"),
+      guide: z.string().optional().describe("Markdown guide text (save only)"),
     },
-  }, async ({ template_id, name, description, canon_types, themes, guide }) => {
-    logToolCall("update_template", { template_id });
-    const template: store.ProjectTemplate = {
-      id: template_id,
-      name,
-      description,
-      canon_types,
-      themes: themes ?? [],
-      guide: guide ?? null,
-    };
-    await store.saveTemplate(template);
-    return textResult(`Template "${template_id}" saved with ${canon_types.length} canon types.`);
-  });
-
-  server.registerTool("apply_template", {
-    title: "Apply Template",
-    description:
-      "Apply (or re-apply) a template to an existing project. Creates any missing " +
-      "canon directories, merges new canon types into project.json, and writes/overwrites " +
-      "GUIDE.md. Existing canon entries and prose are never deleted.",
-    inputSchema: {
-      project: projectParam,
-      template_id: z.string().describe("Template ID to apply"),
-    },
-  }, async ({ project, template_id }) => {
-    logToolCall("apply_template", { project, template_id });
-    const template = await store.loadTemplate(template_id);
-    const result = await store.applyTemplateToProject(project, template);
-    if (result.changed_files.length > 0) {
-      try {
-        await autoCommit(result.root, result.changed_files, `[auto] apply template: ${template_id}`);
-      } catch (err) {
-        console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
+  }, async (args) => {
+    logToolCall("template", { action: args.action, template_id: args.template_id, project: args.project });
+    try {
+      switch (args.action) {
+        case "list": {
+          const templates = await store.listTemplates();
+          if (templates.length === 0) {
+            return textResult("No templates found. Projects will use the default setup (characters + locations).");
+          }
+          return jsonResult(templates);
+        }
+        case "get": {
+          if (!args.template_id) throw new Error("template_id is required for action='get'");
+          const template = await store.loadTemplate(args.template_id);
+          return jsonResult(template);
+        }
+        case "save": {
+          requireArgs(args, ["template_id", "name", "description"], "action='save'");
+          if (!args.canon_types || args.canon_types.length === 0) throw new Error("canon_types is required for action='save'");
+          const template: store.ProjectTemplate = {
+            id: args.template_id!,
+            name: args.name!,
+            description: args.description!,
+            canon_types: args.canon_types,
+            themes: args.themes ?? [],
+            guide: args.guide ?? null,
+          };
+          await store.saveTemplate(template);
+          return textResult(`Template "${args.template_id}" saved with ${args.canon_types.length} canon types.`);
+        }
+        case "apply": {
+          if (!args.template_id) throw new Error("template_id is required for action='apply'");
+          if (!args.project) throw new Error("project is required for action='apply'");
+          const tmpl = await store.loadTemplate(args.template_id);
+          const result = await store.applyTemplateToProject(args.project, tmpl);
+          if (result.changed_files.length > 0) {
+            await commitFiles(result.root, result.changed_files, `[auto] apply template: ${args.template_id}`);
+          }
+          return jsonResult({
+            template_id: args.template_id,
+            created_dirs: result.created_dirs,
+            guide_updated: result.guide_updated,
+            message: result.created_dirs.length > 0
+              ? `Applied "${args.template_id}": created ${result.created_dirs.join(", ")}${result.guide_updated ? ", updated GUIDE.md" : ""}`
+              : `Applied "${args.template_id}": all canon dirs already exist${result.guide_updated ? ", updated GUIDE.md" : ""}`,
+          });
+        }
       }
-    }
-    return jsonResult({
-      template_id,
-      created_dirs: result.created_dirs,
-      guide_updated: result.guide_updated,
-      message: result.created_dirs.length > 0
-        ? `Applied "${template_id}": created ${result.created_dirs.join(", ")}${result.guide_updated ? ", updated GUIDE.md" : ""}`
-        : `Applied "${template_id}": all canon dirs already exist${result.guide_updated ? ", updated GUIDE.md" : ""}`,
-    });
-  });
-
-  server.registerTool("create_part", {
-    title: "Create Part",
-    description: "Create a new part directory with part.json and add it to the project's parts list. Must be called BEFORE create_chapter for this part. Workflow: create_part → create_chapter → add_beat → write_beat_prose.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
-      title: z.string().describe("Display title for the part"),
-      summary: z.string().optional().describe("Part summary"),
-      arc: z.string().optional().describe("Arc description for this part"),
-    },
-  }, async ({ project, part_id, title, summary, arc }) => {
-    logToolCall("create_part", { project, part_id, title });
-    try {
-      const root = store.projectRoot(project);
-      const results = await withCommit(
-        root,
-        () => store.createPart(project, part_id, title, summary ?? "", arc ?? ""),
-        `Created part ${part_id}: ${title}`
-      );
-      return jsonResult(results);
     } catch (err) {
-      logToolError("create_part", err);
+      logToolError("template", err);
       throw err;
     }
   });
 
-  server.registerTool("create_chapter", {
-    title: "Create Chapter",
-    description: "Create a new chapter (prose .md + .meta.json) inside a part and add it to the part's chapters list. The part must already exist (use create_part first). The chapter starts empty — use add_beat to define beats, then write_beat_prose to fill them.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier"),
-      chapter_id: z.string().describe("Chapter identifier, e.g. 'chapter-01'"),
-      title: z.string().describe("Chapter title"),
-      summary: z.string().optional().describe("Chapter summary"),
-      pov: z.string().optional().describe("POV character id"),
-      location: z.string().optional().describe("Location id"),
-      timeline_position: z.string().optional().describe("Timeline position, e.g. '1996-09-14'"),
-    },
-  }, async ({ project, part_id, chapter_id, title, summary, pov, location, timeline_position }) => {
-    logToolCall("create_chapter", { project, part_id, chapter_id, title });
-    try {
-      const root = store.projectRoot(project);
-      const results = await withCommit(
-        root,
-        () => store.createChapter(project, part_id, chapter_id, title, summary ?? "", pov ?? "", location ?? "", timeline_position ?? ""),
-        `Created chapter ${part_id}/${chapter_id}: ${title}`
-      );
-      return jsonResult(results);
-    } catch (err) {
-      logToolError("create_chapter", err);
-      throw err;
-    }
-  });
-
-  // =================================================================
-  // READ OPERATIONS
-  // =================================================================
-
-  server.registerTool("search", {
-    title: "Search",
-    description: "Full-text search across prose, canon, and scratch files. Returns matching lines with file paths and line numbers.",
-    inputSchema: {
-      project: projectParam,
-      query: z.string().describe("Search query (case-insensitive)"),
-      scope: z.enum(["prose", "canon", "scratch"]).optional().describe("Limit search to a specific scope"),
-    },
-  }, async ({ project, query, scope }) => {
-    const results = await store.search(project, query, scope);
-    if (results.length === 0) {
-      return textResult(`No results for "${query}"`);
-    }
-    const formatted = results
-      .slice(0, 50)
-      .map((r) => `${r.file}:${r.line}: ${r.text}`)
-      .join("\n");
-    return textResult(`${results.length} result(s) for "${query}":\n\n${formatted}`);
-  });
-
+  // =========================================================================
+  // get_context — primary read tool (now includes search)
+  // =========================================================================
 
   server.registerTool("get_context", {
     title: "Get Context",
@@ -537,7 +425,7 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: {
       project: projectParam,
       include: z.object({
-        canon: z.array(z.string()).optional().describe("Canon entry IDs to load. Returns summary (top-matter before first ## header) + sections TOC + extended_files listing. Use # for sections: 'emmy#voice-personality'. Use / for extended files: 'emmy/voice-samples'. Type is inferred by scanning canon directories."),
+        canon: z.array(z.string()).optional().describe("Canon entry IDs to load. Returns summary (top-matter before first ## header) + sections TOC. Use # for sections: 'emmy#voice-personality'. Type is inferred by scanning canon directories."),
         scratch: z.array(z.string()).optional().describe("Scratch filenames, e.g. ['voice-codex.md']"),
         parts: z.array(z.string()).optional().describe("Part IDs, e.g. ['part-01']"),
         chapter_meta: z.array(z.string()).optional().describe("Chapter refs, e.g. ['part-01/chapter-03']"),
@@ -554,201 +442,57 @@ async function createMcpServer(): Promise<McpServer> {
         }).optional().describe("Include inline annotations. Pass {} for all, or add scope/type/author filters."),
         scratch_index: z.boolean().optional().describe("Include the scratch folder index (scratch.json)"),
         canon_list: z.union([z.boolean(), z.string()]).optional().describe("true = list canon types; string = list entries within that type, e.g. 'characters'"),
+        search: z.object({
+          query: z.string().describe("Search query (case-insensitive)"),
+          scope: z.enum(["prose", "canon", "scratch"]).optional().describe("Limit search to a specific scope"),
+        }).optional().describe("Full-text search across prose, canon, and scratch files. Results added to response under 'search' key."),
       }).describe("What to include. Every key is optional. Request exactly what you need."),
     },
   }, async ({ project, include }) => {
-    const data = await store.getContext(project, include);
+    // Separate search from store-native includes
+    const { search: searchOpts, ...storeInclude } = include;
+    const data = await store.getContext(project, storeInclude) as Record<string, unknown>;
+
+    // Handle search if requested
+    if (searchOpts) {
+      const results = await store.search(project, searchOpts.query, searchOpts.scope);
+      if (results.length === 0) {
+        data.search = { results: [], message: `No results for "${searchOpts.query}"` };
+      } else {
+        const formatted = results
+          .slice(0, 50)
+          .map((r) => `${r.file}:${r.line}: ${r.text}`);
+        data.search = { results: formatted, total: results.length, query: searchOpts.query };
+      }
+    }
+
     return jsonResult(data);
   });
 
-  // =================================================================
-  // WRITE OPERATIONS
-  // =================================================================
+  // =========================================================================
+  // create — consolidated from create_project, create_part, create_chapter,
+  //          add_beat, add_scratch, add_note
+  // =========================================================================
 
-  server.registerTool("update_project", {
-    title: "Update Project",
-    description: "Update top-level project metadata. Provide only the fields you want to change — others are preserved.",
-    inputSchema: {
-      project: projectParam,
-      patch: z.object({
-        title: z.string().optional().describe("Project title"),
-        subtitle: z.string().nullable().optional().describe("Project subtitle"),
-        logline: z.string().optional().describe("One-sentence story summary"),
-        status: z.string().optional().describe("e.g. 'planning', 'in-progress', 'complete'"),
-        themes: z.array(z.string()).optional().describe("Thematic threads being tracked"),
-        parts: z.array(z.string()).optional().describe("Ordered part IDs, e.g. ['part-01', 'part-02']"),
-        canon_types: z.array(z.object({
-          id: z.string().describe("Canon type directory name, e.g. 'factions'"),
-          label: z.string().describe("Display label, e.g. 'Factions'"),
-          description: z.string().describe("What this canon type contains"),
-        })).optional().describe("Canon type definitions. Updates metadata only — use update_canon with the new type to create entries."),
-      }).describe("Fields to update in project.json. Only include fields you want to change."),
-    },
-  }, async ({ project, patch }) => {
-    logToolCall("update_project", { project, keys: Object.keys(patch) });
-    try {
-      const root = store.projectRoot(project);
-      const result = await withCommit(
-        root,
-        () => store.updateProject(project, patch),
-        `Updated project: ${Object.keys(patch).join(", ")}`
-      );
-      return jsonResult(result);
-    } catch (err) {
-      logToolError("update_project", err);
-      throw err;
-    }
-  });
-
-  server.registerTool("update_part", {
-    title: "Update Part",
-    description: "Update an existing part's metadata. The part must already exist — use create_part for new parts, not update_part. Provide only the fields you want to change.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier"),
-      patch: z.object({
-        title: z.string().optional().describe("Part title"),
-        summary: z.string().optional().describe("Part summary"),
-        arc: z.string().optional().describe("Arc description"),
-        status: z.string().optional().describe("'planning', 'clean', 'dirty', 'conflict'"),
-        chapters: z.array(z.string()).optional().describe("Ordered chapter IDs"),
-      }).describe("Fields to update in part.json. Only include fields you want to change."),
-    },
-  }, async ({ project, part_id, patch }) => {
-    logToolCall("update_part", { project, part_id, keys: Object.keys(patch) });
-    try {
-      const root = store.projectRoot(project);
-      const result = await withCommit(
-        root,
-        () => store.updatePart(project, part_id, patch),
-        `Updated ${part_id}: ${Object.keys(patch).join(", ")}`
-      );
-      return jsonResult(result);
-    } catch (err) {
-      logToolError("update_part", err);
-      throw err;
-    }
-  });
-
-  server.registerTool("update_chapter_meta", {
-    title: "Update Chapter Meta",
-    description: "Update a chapter's metadata. The chapter must already exist — use create_chapter first. When updating beats, provide an array with just the beats to change (matched by id); unlisted beats are untouched.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier"),
-      chapter_id: z.string().describe("Chapter identifier"),
-      patch: z.object({
-        title: z.string().optional().describe("Chapter title"),
-        summary: z.string().optional().describe("Chapter summary"),
-        pov: z.string().optional().describe("POV character id"),
-        location: z.string().optional().describe("Location id"),
-        timeline_position: z.string().optional().describe("e.g. '1996-09-14'"),
-        status: z.string().optional().describe("'planning', 'clean', 'dirty', 'conflict'"),
-        dirty_reason: z.string().nullable().optional().describe("Why this chapter needs review (set with status='dirty', null to clear)"),
-        beats: z.array(z.object({
-          id: z.string().describe("Beat identifier, e.g. 'b01'"),
-          label: z.string().optional().describe("Short beat label"),
-          summary: z.string().optional().describe("Beat summary"),
-          status: z.string().optional().describe("'planned', 'written', 'dirty', 'conflict'"),
-          dirty_reason: z.string().nullable().optional().describe("Why this beat needs review"),
-          characters: z.array(z.string()).optional().describe("Character IDs"),
-          depends_on: z.array(z.string()).optional().describe("e.g. ['chapter-01:b02']"),
-          depended_by: z.array(z.string()).optional().describe("Beat refs that depend on this"),
-        })).optional().describe("Beats to merge by ID. Unlisted beats are untouched."),
-      }).describe("Fields to update. Only include fields you want to change."),
-    },
-  }, async ({ project, part_id, chapter_id, patch }) => {
-    logToolCall("update_chapter_meta", { project, part_id, chapter_id, keys: Object.keys(patch) });
-    try {
-      const root = store.projectRoot(project);
-      const result = await withCommit(
-        root,
-        () => store.updateChapterMeta(project, part_id, chapter_id, patch as Partial<store.ChapterMeta>),
-        `Updated ${part_id}/${chapter_id} meta: ${Object.keys(patch).join(", ")}`
-      );
-      return jsonResult(result);
-    } catch (err) {
-      logToolError("update_chapter_meta", err);
-      throw err;
-    }
-  });
-
-  server.registerTool("write_beat_prose", {
-    title: "Write Beat Prose",
-    description: "Insert or replace the prose content for a specific beat in a chapter. The beat must already exist (use add_beat first). With append=true, adds a new variant block after the existing one(s) instead of replacing.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier"),
-      chapter_id: z.string().describe("Chapter identifier"),
-      beat_id: z.string().describe("Beat identifier"),
-      content: z.string().describe("The prose content for this beat"),
-      append: z.boolean().optional().describe(
-        "If true, append as a new variant block after existing block(s) for this beat. " +
-        "If false (default), replace the first existing block."
-      ),
-    },
-  }, async ({ project, part_id, chapter_id, beat_id, content, append }) => {
-    logToolCall("write_beat_prose", { project, part_id, chapter_id, beat_id, append, content });
-    try {
-      const root = store.projectRoot(project);
-      const result = await withCommit(
-        root,
-        () => store.writeBeatProse(project, part_id, chapter_id, beat_id, content, append ?? false),
-        `${append ? "Appended variant to" : "Updated"} ${part_id}/${chapter_id} beat ${beat_id} prose`
-      );
-      return jsonResult(result);
-    } catch (err) {
-      logToolError("write_beat_prose", err);
-      throw err;
-    }
-  });
-
-  server.registerTool("edit_beat_prose", {
-    title: "Edit Beat Prose",
+  server.registerTool("create", {
+    title: "Create",
     description:
-      "Surgical string replacement within a beat's prose. " +
-      "Supports multiple ordered find/replace pairs, applied atomically — if any edit fails, none are applied. " +
-      "Use this instead of write_beat_prose when changing words or sentences rather than rewriting the whole beat.",
+      "Create a new entity. target='project' bootstraps a new project. " +
+      "target='part' creates a part directory. target='chapter' creates a chapter. " +
+      "target='beat' adds a beat to a chapter. target='scratch' adds a scratch file. " +
+      "target='note' inserts an inline annotation.",
     inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier"),
-      chapter_id: z.string().describe("Chapter identifier"),
-      beat_id: z.string().describe("Beat identifier"),
-      edits: z.array(z.object({
-        old_str: z.string().describe("Exact text to find (must match exactly once within the beat)"),
-        new_str: z.string().describe("Replacement text (empty string = deletion)"),
-      })).describe("Ordered list of find/replace pairs. Applied sequentially — edit 2 sees the result of edit 1."),
-      variant_index: z.number().optional().describe("Which variant to edit (default: 0 = first/only block)"),
-    },
-  }, async ({ project, part_id, chapter_id, beat_id, edits, variant_index }) => {
-    logToolCall("edit_beat_prose", { project, part_id, chapter_id, beat_id, edits_count: edits.length });
-    try {
-      const root = store.projectRoot(project);
-      const outcome = await store.editBeatProse(
-        project, part_id, chapter_id, beat_id, edits, variant_index ?? 0
-      );
-      const files = [outcome.result.path.startsWith(root)
-        ? outcome.result.path.slice(root.length + 1) : outcome.result.path];
-      try {
-        await autoCommit(root, files,
-          `Edited ${part_id}/${chapter_id}:${beat_id} (${outcome.edits_applied} edits)`);
-      } catch (err) {
-        console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
-      }
-      return jsonResult(outcome);
-    } catch (err) {
-      logToolError("edit_beat_prose", err);
-      throw err;
-    }
-  });
-
-  server.registerTool("add_beat", {
-    title: "Add Beat",
-    description: "Add a new beat to a chapter's structure (both the markdown marker and the meta entry). The chapter must already exist — use create_chapter first. After adding, use write_beat_prose to write its content.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier"),
-      chapter_id: z.string().describe("Chapter identifier"),
+      target: z.enum(["project", "part", "chapter", "beat", "scratch", "note"]).describe("What to create"),
+      project: projectParam.optional().describe("Project identifier — IS the new project id for target='project'; required for all targets"),
+      title: z.string().optional().describe("Display title (project, part, chapter)"),
+      template: z.string().optional().describe("Template ID for project setup (project only)"),
+      part_id: z.string().optional().describe("Part identifier (part, chapter, beat, note)"),
+      chapter_id: z.string().optional().describe("Chapter identifier (chapter, beat, note)"),
+      summary: z.string().optional().describe("Summary (part, chapter)"),
+      arc: z.string().optional().describe("Arc description (part only)"),
+      pov: z.string().optional().describe("POV character id (chapter only)"),
+      location: z.string().optional().describe("Location id (chapter only)"),
+      timeline_position: z.string().optional().describe("Timeline position, e.g. '1996-09-14' (chapter only)"),
       beat: z.object({
         id: z.string().describe("Beat identifier, e.g. 'b01'"),
         label: z.string().describe("Short label, e.g. 'Unit 7 opens the bakery'"),
@@ -758,62 +502,424 @@ async function createMcpServer(): Promise<McpServer> {
         characters: z.array(z.string()).optional().describe("Character IDs, e.g. ['unit-7', 'marguerite']"),
         depends_on: z.array(z.string()).optional().describe("Beat refs this depends on, e.g. ['chapter-01:b02']"),
         depended_by: z.array(z.string()).optional().describe("Beat refs that depend on this"),
-      }).describe("Beat definition. Required: id, label, summary. Others have sensible defaults."),
-      after_beat_id: z.string().optional().describe("Insert after this beat ID. If omitted, appends to end."),
+      }).optional().describe("Beat definition (beat only). Required: id, label, summary."),
+      after_beat_id: z.string().optional().describe("Insert after this beat ID (beat only). Omit to append."),
+      filename: z.string().optional().describe("Scratch filename, e.g. 'unit7-dream-sequence.md' (scratch only)"),
+      content: z.string().optional().describe("Content of the scratch file (scratch only)"),
+      note: z.string().optional().describe("Note about what this is and where it might go (scratch only)"),
+      characters: z.array(z.string()).optional().describe("Characters involved (scratch only)"),
+      mood: z.string().optional().describe("Mood/tone description (scratch only)"),
+      potential_placement: z.string().optional().describe("Where this might end up, e.g. 'part-01/chapter-04' (scratch only)"),
+      line_number: z.number().optional().describe("Line number to insert annotation after, 1-based (note only)"),
+      note_type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).optional().describe(
+        "Annotation type (note only): 'note' (general), 'dev' (structural), 'line' (prose craft), 'continuity' (consistency), 'query' (question), 'flag' (wordless marker)"
+      ),
+      message: z.string().optional().describe("Annotation message (note only, required except for 'flag')"),
+      version: z.string().optional().describe("Version token for line-number translation if file changed (note only)"),
     },
-  }, async ({ project, part_id, chapter_id, beat, after_beat_id }) => {
-    logToolCall("add_beat", { project, part_id, chapter_id, beat_id: beat.id, after_beat_id });
+  }, async (args) => {
+    const { target } = args;
+    logToolCall("create", { target, project: args.project, part_id: args.part_id, chapter_id: args.chapter_id });
     try {
-      const beatDef: store.BeatMeta = {
-        id: beat.id,
-        label: beat.label,
-        summary: beat.summary,
-        status: beat.status ?? "planned",
-        dirty_reason: beat.dirty_reason ?? null,
-        characters: beat.characters ?? [],
-        depends_on: beat.depends_on ?? [],
-        depended_by: beat.depended_by ?? [],
-      };
-      const root = store.projectRoot(project);
-      const results = await withCommit(
-        root,
-        () => store.addBeat(project, part_id, chapter_id, beatDef, after_beat_id),
-        `Added beat ${beatDef.id} to ${part_id}/${chapter_id}`
-      );
-      return jsonResult(results);
+      switch (target) {
+        case "project": {
+          if (!args.project) throw new Error("project is required (the project ID to create)");
+          if (!args.title) throw new Error("title is required for target='project'");
+          let tmpl: store.ProjectTemplate | undefined;
+          if (args.template) {
+            tmpl = await store.loadTemplate(args.template);
+          }
+          const root = await store.ensureProjectStructure(args.project, args.title, tmpl);
+          await ensureGitRepo(root);
+          return jsonResult({
+            project: args.project,
+            root,
+            template: args.template ?? "default",
+            description: `Created project "${args.title}" at ${root}`,
+          });
+        }
+        case "part": {
+          requireArgs(args, ["project", "part_id", "title"], "target='part'");
+          const root = store.projectRoot(args.project!);
+          const results = await withCommit(
+            root,
+            () => store.createPart(args.project!, args.part_id!, args.title!, args.summary ?? "", args.arc ?? ""),
+            `Created part ${args.part_id}: ${args.title}`
+          );
+          return jsonResult(results);
+        }
+        case "chapter": {
+          requireArgs(args, ["project", "part_id", "chapter_id", "title"], "target='chapter'");
+          const root = store.projectRoot(args.project!);
+          const results = await withCommit(
+            root,
+            () => store.createChapter(args.project!, args.part_id!, args.chapter_id!, args.title!, args.summary ?? "", args.pov ?? "", args.location ?? "", args.timeline_position ?? ""),
+            `Created chapter ${args.part_id}/${args.chapter_id}: ${args.title}`
+          );
+          return jsonResult(results);
+        }
+        case "beat": {
+          requireArgs(args, ["project", "part_id", "chapter_id", "beat"], "target='beat'");
+          const beat = args.beat!;
+          const beatDef: store.BeatMeta = {
+            id: beat.id,
+            label: beat.label,
+            summary: beat.summary,
+            status: beat.status ?? "planned",
+            dirty_reason: beat.dirty_reason ?? null,
+            characters: beat.characters ?? [],
+            depends_on: beat.depends_on ?? [],
+            depended_by: beat.depended_by ?? [],
+          };
+          const root = store.projectRoot(args.project!);
+          const results = await withCommit(
+            root,
+            () => store.addBeat(args.project!, args.part_id!, args.chapter_id!, beatDef, args.after_beat_id),
+            `Added beat ${beatDef.id} to ${args.part_id}/${args.chapter_id}`
+          );
+          return jsonResult(results);
+        }
+        case "scratch": {
+          requireArgs(args, ["project", "filename", "note"], "target='scratch'");
+          if (args.content === undefined) throw new Error("content is required for target='scratch'");
+          const root = store.projectRoot(args.project!);
+          const results = await withCommit(
+            root,
+            () => store.addScratch(args.project!, args.filename!, args.content!, args.note!, args.characters ?? [], args.mood ?? "", args.potential_placement ?? null),
+            `Added scratch: ${args.filename}`
+          );
+          return jsonResult(results);
+        }
+        case "note": {
+          requireArgs(args, ["project", "part_id", "chapter_id", "note_type"], "target='note'");
+          if (args.line_number == null) throw new Error("line_number is required for target='note'");
+          if (args.note_type !== "flag" && !args.message) {
+            throw new Error(`message is required for @${args.note_type} annotations`);
+          }
+          const root = store.projectRoot(args.project!);
+          const result = await store.insertAnnotation(
+            args.project!, args.part_id!, args.chapter_id!, args.line_number,
+            args.note_type as "note" | "dev" | "line" | "continuity" | "query" | "flag",
+            args.message ?? null, "claude", args.version
+          );
+
+          await commitFiles(root, [result.path], `Added @${args.note_type}(claude) annotation to ${args.part_id}/${args.chapter_id}`);
+
+          // Get post-commit version
+          const { getFileVersion } = await import("./git.js");
+          const relPath = result.path.startsWith(root) ? result.path.slice(root.length + 1) : result.path;
+          const newVersion = await getFileVersion(root, relPath);
+
+          return jsonResult({
+            id: result.id,
+            inserted_after_line: result.inserted_after_line,
+            location: `${args.part_id}/${args.chapter_id}`,
+            version: newVersion,
+          });
+        }
+      }
     } catch (err) {
-      logToolError("add_beat", err);
+      logToolError("create", err);
       throw err;
     }
   });
 
-  server.registerTool("remove_beat", {
-    title: "Remove Beat",
-    description: "Remove a beat from a chapter. All prose blocks (including variants) are moved to scratch for safekeeping.",
+  // =========================================================================
+  // update — consolidated from update_project, update_part,
+  //          update_chapter_meta, mark_node
+  // =========================================================================
+
+  server.registerTool("update", {
+    title: "Update",
+    description:
+      "Update metadata for an existing entity. target='project' patches project.json. " +
+      "target='part' patches part metadata. target='chapter' patches chapter metadata " +
+      "(including beats — provide array with just the beats to change, matched by id; unlisted beats untouched). " +
+      "target='node' sets dirty/clean status on any node.",
     inputSchema: {
+      target: z.enum(["project", "part", "chapter", "node"]).describe("What to update"),
       project: projectParam,
-      part_id: z.string().describe("Part identifier"),
-      chapter_id: z.string().describe("Chapter identifier"),
-      beat_id: z.string().describe("Beat identifier to remove"),
+      part_id: z.string().optional().describe("Part identifier (part, chapter)"),
+      chapter_id: z.string().optional().describe("Chapter identifier (chapter only)"),
+      patch: z.object({
+        title: z.string().optional().describe("Title (project, part, chapter)"),
+        subtitle: z.string().nullable().optional().describe("Project subtitle"),
+        logline: z.string().optional().describe("One-sentence story summary (project)"),
+        status: z.string().optional().describe("Status string (project, part, chapter)"),
+        themes: z.array(z.string()).optional().describe("Thematic threads (project)"),
+        parts: z.array(z.string()).optional().describe("Ordered part IDs (project)"),
+        canon_types: z.array(z.object({
+          id: z.string().describe("Canon type directory name, e.g. 'factions'"),
+          label: z.string().describe("Display label, e.g. 'Factions'"),
+          description: z.string().describe("What this canon type contains"),
+        })).optional().describe("Canon type definitions (project)"),
+        summary: z.string().optional().describe("Summary (part, chapter)"),
+        arc: z.string().optional().describe("Arc description (part)"),
+        chapters: z.array(z.string()).optional().describe("Ordered chapter IDs (part)"),
+        pov: z.string().optional().describe("POV character id (chapter)"),
+        location: z.string().optional().describe("Location id (chapter)"),
+        timeline_position: z.string().optional().describe("Timeline position (chapter)"),
+        dirty_reason: z.string().nullable().optional().describe("Why this chapter needs review (chapter)"),
+        beats: z.array(z.object({
+          id: z.string().describe("Beat identifier, e.g. 'b01'"),
+          label: z.string().optional().describe("Short beat label"),
+          summary: z.string().optional().describe("Beat summary"),
+          status: z.string().optional().describe("'planned', 'written', 'dirty', 'conflict'"),
+          dirty_reason: z.string().nullable().optional().describe("Why this beat needs review"),
+          characters: z.array(z.string()).optional().describe("Character IDs"),
+          depends_on: z.array(z.string()).optional().describe("e.g. ['chapter-01:b02']"),
+          depended_by: z.array(z.string()).optional().describe("Beat refs that depend on this"),
+        })).optional().describe("Beats to merge by ID. Unlisted beats untouched. (chapter)"),
+      }).optional().describe("Fields to update (project, part, chapter). Only include fields you want to change."),
+      node_ref: z.string().optional().describe("Node reference for target='node', e.g. 'part-01', 'part-01/chapter-02', 'part-01/chapter-02:b03'"),
+      mark: z.enum(["dirty", "clean"]).optional().describe("'dirty' to flag for review, 'clean' to clear (node only)"),
+      reason: z.string().optional().describe("Why this node is dirty (node only, required when mark='dirty')"),
     },
-  }, async ({ project, part_id, chapter_id, beat_id }) => {
-    logToolCall("remove_beat", { project, part_id, chapter_id, beat_id });
+  }, async (args) => {
+    const { target, project } = args;
+    logToolCall("update", { target, project, part_id: args.part_id, chapter_id: args.chapter_id, node_ref: args.node_ref });
     try {
-      const root = store.projectRoot(project);
-      const results = await withCommit(
-        root,
-        () => store.removeBeat(project, part_id, chapter_id, beat_id),
-        `Removed beat ${beat_id} from ${part_id}/${chapter_id} (prose → scratch)`
-      );
-      return jsonResult(results);
+      switch (target) {
+        case "project": {
+          if (!args.patch) throw new Error("patch is required for target='project'");
+          const root = store.projectRoot(project);
+          const result = await withCommit(
+            root,
+            () => store.updateProject(project, args.patch! as Partial<store.ProjectData>),
+            `Updated project: ${Object.keys(args.patch).join(", ")}`
+          );
+          return jsonResult(result);
+        }
+        case "part": {
+          if (!args.part_id) throw new Error("part_id is required for target='part'");
+          if (!args.patch) throw new Error("patch is required for target='part'");
+          const root = store.projectRoot(project);
+          const result = await withCommit(
+            root,
+            () => store.updatePart(project, args.part_id!, args.patch! as Partial<store.PartData>),
+            `Updated ${args.part_id}: ${Object.keys(args.patch).join(", ")}`
+          );
+          return jsonResult(result);
+        }
+        case "chapter": {
+          requireArgs(args, ["part_id", "chapter_id", "patch"], "target='chapter'");
+          const root = store.projectRoot(project);
+          const result = await withCommit(
+            root,
+            () => store.updateChapterMeta(project, args.part_id!, args.chapter_id!, args.patch! as Partial<store.ChapterMeta>),
+            `Updated ${args.part_id}/${args.chapter_id} meta: ${Object.keys(args.patch!).join(", ")}`
+          );
+          return jsonResult(result);
+        }
+        case "node": {
+          if (!args.node_ref) throw new Error("node_ref is required for target='node'");
+          if (!args.mark) throw new Error("mark is required for target='node'");
+          if (args.mark === "dirty" && !args.reason) {
+            throw new Error("reason is required when mark='dirty'");
+          }
+          const root = store.projectRoot(project);
+          const commitMsg = args.mark === "dirty"
+            ? `Marked ${args.node_ref} dirty (${args.reason})`
+            : `Marked ${args.node_ref} clean`;
+          const results = await withCommit(
+            root,
+            () => store.setNodeStatus(project, args.node_ref!, args.mark!, args.reason),
+            commitMsg
+          );
+          return jsonResult(results);
+        }
+      }
     } catch (err) {
-      logToolError("remove_beat", err);
+      logToolError("update", err);
       throw err;
     }
   });
 
-  server.registerTool("select_beat_variant", {
-    title: "Select Beat Variant",
+  // =========================================================================
+  // write — consolidated from write_beat_prose, update_canon, promote_scratch
+  // =========================================================================
+
+  server.registerTool("write", {
+    title: "Write",
+    description:
+      "Write or replace content. target='beat' writes prose to a beat (or promotes scratch into it via source_scratch). " +
+      "target='canon' creates or rewrites a canon entry. Use ## sections to organize — agents lazy-load via # notation.",
+    inputSchema: {
+      target: z.enum(["beat", "canon"]).describe("What to write"),
+      project: projectParam,
+      content: z.string().optional().describe("The content to write. Required unless source_scratch is provided (beat only)."),
+      part_id: z.string().optional().describe("Part identifier (beat only)"),
+      chapter_id: z.string().optional().describe("Chapter identifier (beat only)"),
+      beat_id: z.string().optional().describe("Beat identifier (beat only)"),
+      append: z.boolean().optional().describe("If true, append as a new variant block after existing one(s) (beat only)"),
+      source_scratch: z.string().optional().describe("Scratch filename to promote into this beat instead of providing content (beat only)"),
+      type: z.string().optional().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions' (canon only)"),
+      id: z.string().optional().describe("Canon entry id (canon only)"),
+      meta: z.object({
+        id: z.string().optional().describe("Canon entry id"),
+        type: z.string().optional().describe("e.g. 'character', 'location'"),
+        role: z.string().optional().describe("e.g. 'protagonist', 'mentor', 'antagonist'"),
+        appears_in: z.array(z.string()).optional().describe("Beat refs, e.g. ['part-01/chapter-01:b01']"),
+        last_updated: z.string().optional().describe("ISO timestamp"),
+        updated_by: z.string().optional().describe("e.g. 'claude-conversation'"),
+      }).passthrough().optional().describe("Navigation metadata sidecar (canon only). Index data only — role, appears_in, timestamps."),
+    },
+  }, async (args) => {
+    const { target, project } = args;
+    logToolCall("write", { target, project, part_id: args.part_id, chapter_id: args.chapter_id, beat_id: args.beat_id, source_scratch: args.source_scratch, type: args.type, id: args.id });
+    try {
+      switch (target) {
+        case "beat": {
+          requireArgs(args, ["part_id", "chapter_id", "beat_id"], "target='beat'");
+          const root = store.projectRoot(project);
+
+          if (args.source_scratch) {
+            // Promote scratch into beat
+            const results = await withCommit(
+              root,
+              () => store.promoteScratch(project, args.source_scratch!, args.part_id!, args.chapter_id!, args.beat_id!),
+              `Promoted scratch/${args.source_scratch} → ${args.part_id}/${args.chapter_id}:${args.beat_id}`
+            );
+            return jsonResult(results);
+          }
+
+          if (args.content === undefined) throw new Error("content is required for target='beat' (or provide source_scratch)");
+          const result = await withCommit(
+            root,
+            () => store.writeBeatProse(project, args.part_id!, args.chapter_id!, args.beat_id!, args.content!, args.append ?? false),
+            `${args.append ? "Appended variant to" : "Updated"} ${args.part_id}/${args.chapter_id} beat ${args.beat_id} prose`
+          );
+          return jsonResult(result);
+        }
+        case "canon": {
+          if (!args.type) throw new Error("type is required for target='canon'");
+          if (!args.id) throw new Error("id is required for target='canon'");
+          if (args.content === undefined) throw new Error("content is required for target='canon'");
+          const root = store.projectRoot(project);
+          const results = await withCommit(
+            root,
+            () => store.updateCanon(project, args.type!, args.id!, args.content!, args.meta),
+            `Canon update: ${args.type}/${args.id}`
+          );
+          return jsonResult(results);
+        }
+      }
+    } catch (err) {
+      logToolError("write", err);
+      throw err;
+    }
+  });
+
+  // =========================================================================
+  // edit — consolidated from edit_beat_prose, edit_canon
+  // =========================================================================
+
+  server.registerTool("edit", {
+    title: "Edit",
+    description:
+      "Surgical string replacement within existing content. Supports multiple ordered " +
+      "find/replace pairs, applied atomically — if any edit fails, none are applied. " +
+      "Use instead of write when changing words or sentences rather than rewriting.",
+    inputSchema: {
+      target: z.enum(["beat", "canon"]).describe("What to edit"),
+      project: projectParam,
+      edits: z.array(z.object({
+        old_str: z.string().describe("Exact text to find (must match exactly once)"),
+        new_str: z.string().describe("Replacement text (empty string = deletion)"),
+      })).describe("Ordered list of find/replace pairs. Applied sequentially — edit 2 sees the result of edit 1."),
+      part_id: z.string().optional().describe("Part identifier (beat only)"),
+      chapter_id: z.string().optional().describe("Chapter identifier (beat only)"),
+      beat_id: z.string().optional().describe("Beat identifier (beat only)"),
+      variant_index: z.number().optional().describe("Which variant to edit, default 0 (beat only)"),
+      type: z.string().optional().describe("Canon type directory name, e.g. 'characters' (canon only)"),
+      id: z.string().optional().describe("Canon entry id (canon only)"),
+    },
+  }, async (args) => {
+    const { target, project, edits } = args;
+    logToolCall("edit", { target, project, edits_count: edits.length });
+    try {
+      const root = store.projectRoot(project);
+      switch (target) {
+        case "beat": {
+          requireArgs(args, ["part_id", "chapter_id", "beat_id"], "target='beat'");
+          const outcome = await store.editBeatProse(
+            project, args.part_id!, args.chapter_id!, args.beat_id!, edits, args.variant_index ?? 0
+          );
+          await commitFiles(root, [outcome.result.path],
+            `Edited ${args.part_id}/${args.chapter_id}:${args.beat_id} (${outcome.edits_applied} edits)`);
+          return jsonResult(outcome);
+        }
+        case "canon": {
+          if (!args.type) throw new Error("type is required for target='canon'");
+          if (!args.id) throw new Error("id is required for target='canon'");
+          const outcome = await store.editCanon(project, args.type, args.id, edits);
+          await commitFiles(root, [outcome.result.path],
+            `Edited canon/${args.type}/${args.id} (${outcome.edits_applied} edits)`);
+          return jsonResult(outcome);
+        }
+      }
+    } catch (err) {
+      logToolError("edit", err);
+      throw err;
+    }
+  });
+
+  // =========================================================================
+  // remove — consolidated from remove_beat, resolve_notes
+  // =========================================================================
+
+  server.registerTool("remove", {
+    title: "Remove",
+    description:
+      "Remove content. target='beat' removes a beat from a chapter (prose moved to scratch). " +
+      "target='notes' batch-removes inline annotations by ID after they've been addressed.",
+    inputSchema: {
+      target: z.enum(["beat", "notes"]).describe("What to remove"),
+      project: projectParam,
+      part_id: z.string().optional().describe("Part identifier (beat only)"),
+      chapter_id: z.string().optional().describe("Chapter identifier (beat only)"),
+      beat_id: z.string().optional().describe("Beat identifier to remove (beat only)"),
+      note_ids: z.array(z.string()).optional().describe("Note IDs to resolve (notes only), e.g. ['part-01/chapter-03:b02:n47']. Get these from get_context with notes include."),
+    },
+  }, async (args) => {
+    const { target, project } = args;
+    logToolCall("remove", { target, project });
+    try {
+      const root = store.projectRoot(project);
+      switch (target) {
+        case "beat": {
+          requireArgs(args, ["part_id", "chapter_id", "beat_id"], "target='beat'");
+          const results = await withCommit(
+            root,
+            () => store.removeBeat(project, args.part_id!, args.chapter_id!, args.beat_id!),
+            `Removed beat ${args.beat_id} from ${args.part_id}/${args.chapter_id} (prose → scratch)`
+          );
+          return jsonResult(results);
+        }
+        case "notes": {
+          if (!args.note_ids || args.note_ids.length === 0) {
+            return textResult("No note IDs provided. Nothing to resolve.");
+          }
+          const results = await store.removeAnnotationLines(project, args.note_ids);
+          if (results.length > 0) {
+            await commitFiles(root, results.map((r) => r.path),
+              `Resolved ${args.note_ids.length} annotation(s)`);
+          }
+          return jsonResult({ resolved: args.note_ids.length, files_modified: results.length });
+        }
+      }
+    } catch (err) {
+      logToolError("remove", err);
+      throw err;
+    }
+  });
+
+  // =========================================================================
+  // select_variant — specialized (renamed from select_beat_variant)
+  // =========================================================================
+
+  server.registerTool("select_variant", {
+    title: "Select Variant",
     description: "Pick one variant of a beat as the winner, archive the rest to scratch. Use get_context with beat_variants include first to see all variants and decide which to keep.",
     inputSchema: {
       project: projectParam,
@@ -823,27 +929,24 @@ async function createMcpServer(): Promise<McpServer> {
       keep_index: z.number().describe("Zero-based index of the variant to keep (from get_context beat_variants)"),
     },
   }, async ({ project, part_id, chapter_id, beat_id, keep_index }) => {
-    logToolCall("select_beat_variant", { project, part_id, chapter_id, beat_id, keep_index });
+    logToolCall("select_variant", { project, part_id, chapter_id, beat_id, keep_index });
     try {
       const root = store.projectRoot(project);
       const outcome = await store.selectBeatVariant(project, part_id, chapter_id, beat_id, keep_index);
-      // Manual commit since outcome has fields beyond WriteResult[]
-      const files = outcome.results.map((r) =>
-        r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path
-      );
-      if (files.length > 0) {
-        try {
-          await autoCommit(root, files, `Selected variant ${keep_index} for ${part_id}/${chapter_id}:${beat_id}`);
-        } catch (err) {
-          console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
-        }
+      if (outcome.results.length > 0) {
+        await commitFiles(root, outcome.results.map((r) => r.path),
+          `Selected variant ${keep_index} for ${part_id}/${chapter_id}:${beat_id}`);
       }
       return jsonResult({ kept: outcome.kept, archived: outcome.archived, files: outcome.results });
     } catch (err) {
-      logToolError("select_beat_variant", err);
+      logToolError("select_variant", err);
       throw err;
     }
   });
+
+  // =========================================================================
+  // reorder_beats — specialized (unchanged)
+  // =========================================================================
 
   server.registerTool("reorder_beats", {
     title: "Reorder Beats",
@@ -859,15 +962,8 @@ async function createMcpServer(): Promise<McpServer> {
     try {
       const root = store.projectRoot(project);
       const outcome = await store.reorderBeats(project, part_id, chapter_id, beat_order);
-      // Manual commit since outcome has fields beyond WriteResult[]
-      const files = outcome.results.map((r) =>
-        r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path
-      );
-      try {
-        await autoCommit(root, files, `Reordered beats in ${part_id}/${chapter_id}: ${beat_order.join(", ")}`);
-      } catch (err) {
-        console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
-      }
+      await commitFiles(root, outcome.results.map((r) => r.path),
+        `Reordered beats in ${part_id}/${chapter_id}: ${beat_order.join(", ")}`);
       return jsonResult({ previous_order: outcome.previous_order, new_order: outcome.new_order, files: outcome.results });
     } catch (err) {
       logToolError("reorder_beats", err);
@@ -875,249 +971,9 @@ async function createMcpServer(): Promise<McpServer> {
     }
   });
 
-  server.registerTool("mark_node", {
-    title: "Mark Node",
-    description: "Set a node's dirty/clean status. Use status='dirty' with a reason to flag a node for review, or status='clean' to clear it.",
-    inputSchema: {
-      project: projectParam,
-      node_ref: z.string().describe("Node reference, e.g. 'part-01', 'part-01/chapter-02', 'part-01/chapter-02:b03'"),
-      status: z.enum(["dirty", "clean"]).describe("'dirty' to flag for review, 'clean' to clear"),
-      reason: z.string().optional().describe("Why this node is dirty (required when status='dirty', ignored when 'clean')"),
-    },
-  }, async ({ project, node_ref, status, reason }) => {
-    logToolCall("mark_node", { project, node_ref, status, reason });
-    try {
-      if (status === "dirty" && !reason) {
-        throw new Error("reason is required when marking a node dirty");
-      }
-      const root = store.projectRoot(project);
-      if (status === "dirty") {
-        const results = await withCommit(
-          root,
-          () => store.markDirty(project, node_ref, reason!),
-          `Marked ${node_ref} dirty (${reason})`
-        );
-        return jsonResult(results);
-      } else {
-        const results = await withCommit(
-          root,
-          () => store.markClean(project, node_ref),
-          `Marked ${node_ref} clean`
-        );
-        return jsonResult(results);
-      }
-    } catch (err) {
-      logToolError("mark_node", err);
-      throw err;
-    }
-  });
-
-
-  server.registerTool("update_canon", {
-    title: "Update Canon",
-    description:
-      "Create or rewrite a canon entry. Two-tier system: each entry has a brief (always loaded, cheap) " +
-      "and optional extended files (loaded on demand via get_context path notation). " +
-      "The markdown brief holds everything relevant for writing (identity, voice, arc, relationships). " +
-      "The meta sidecar holds only navigation data (role, appears_in, timestamps). " +
-      "Without extended_id, writes the brief. With extended_id, writes an extended file and " +
-      "auto-migrates flat entries to directory format if needed.",
-    inputSchema: {
-      project: projectParam,
-      type: z.string().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions'. Use get_context with canon_list: true to see active types."),
-      id: z.string().describe("Canon entry id"),
-      content: z.string().describe("Markdown content — for the brief (without extended_id) or the extended file (with extended_id)"),
-      meta: z.object({
-        id: z.string().optional().describe("Canon entry id"),
-        type: z.string().optional().describe("e.g. 'character', 'location'"),
-        role: z.string().optional().describe("e.g. 'protagonist', 'mentor', 'antagonist'"),
-        appears_in: z.array(z.string()).optional().describe("Beat refs, e.g. ['part-01/chapter-01:b01']"),
-        last_updated: z.string().optional().describe("ISO timestamp"),
-        updated_by: z.string().optional().describe("e.g. 'claude-conversation'"),
-      }).passthrough().optional().describe("Optional navigation metadata for the .meta.json sidecar. Index data only — role, appears_in, timestamps. Never put writing content (personality, voice, appearance) here; that belongs in the markdown. Good: { role: 'mentor', appears_in: ['part-01/chapter-01:b02'] }. Wrong: { personality: 'stoic, dry humor' } — that belongs in the markdown content."),
-      extended_id: z.string().optional().describe(
-        "If provided, writes an extended file instead of the brief. " +
-        "E.g. 'voice-samples' creates canon/{type}/{id}/voice-samples.md. " +
-        "Auto-migrates flat entries to directory format if needed."
-      ),
-    },
-  }, async ({ project, type, id, content, meta, extended_id }) => {
-    logToolCall("update_canon", { project, type, id, extended_id });
-    try {
-      const root = store.projectRoot(project);
-      const results = await withCommit(
-        root,
-        () => store.updateCanon(project, type, id, content, meta, extended_id),
-        extended_id ? `Canon update: ${type}/${id}/${extended_id}.md` : `Canon update: ${type}/${id}`
-      );
-      return jsonResult(results);
-    } catch (err) {
-      logToolError("update_canon", err);
-      throw err;
-    }
-  });
-
-  server.registerTool("add_scratch", {
-    title: "Add Scratch",
-    description: "Add a new file to the scratch folder (loose scenes, ideas, dialogue riffs).",
-    inputSchema: {
-      project: projectParam,
-      filename: z.string().describe("Filename for the scratch file, e.g. 'unit7-dream-sequence.md'"),
-      content: z.string().describe("Content of the scratch file"),
-      note: z.string().describe("Note about what this is and where it might go"),
-      characters: z.array(z.string()).optional().describe("Characters involved"),
-      mood: z.string().optional().describe("Mood/tone description"),
-      potential_placement: z.string().optional().describe("Where this might end up, e.g. 'part-01/chapter-04'"),
-    },
-  }, async ({ project, filename, content, note, characters, mood, potential_placement }) => {
-    logToolCall("add_scratch", { project, filename, note });
-    try {
-      const root = store.projectRoot(project);
-      const results = await withCommit(
-        root,
-        () => store.addScratch(project, filename, content, note, characters ?? [], mood ?? "", potential_placement ?? null),
-        `Added scratch: ${filename}`
-      );
-      return jsonResult(results);
-    } catch (err) {
-      logToolError("add_scratch", err);
-      throw err;
-    }
-  });
-
-  server.registerTool("promote_scratch", {
-    title: "Promote Scratch",
-    description: "Move a scratch file's content into a beat in the narrative structure.",
-    inputSchema: {
-      project: projectParam,
-      filename: z.string().describe("Scratch filename to promote"),
-      target_part_id: z.string().describe("Target part identifier"),
-      target_chapter_id: z.string().describe("Target chapter identifier"),
-      target_beat_id: z.string().describe("Target beat identifier"),
-    },
-  }, async ({ project, filename, target_part_id, target_chapter_id, target_beat_id }) => {
-    logToolCall("promote_scratch", { project, filename, target_part_id, target_chapter_id, target_beat_id });
-    try {
-      const root = store.projectRoot(project);
-      const results = await withCommit(
-        root,
-        () => store.promoteScratch(project, filename, target_part_id, target_chapter_id, target_beat_id),
-        `Promoted scratch/${filename} → ${target_part_id}/${target_chapter_id}:${target_beat_id}`
-      );
-      return jsonResult(results);
-    } catch (err) {
-      logToolError("promote_scratch", err);
-      throw err;
-    }
-  });
-
-  // -----------------------------------------------------------------------
-  // Annotation tools
-  // -----------------------------------------------------------------------
-
-  server.registerTool("add_note", {
-    title: "Add Note",
-    description:
-      "Insert an inline annotation in a chapter's prose, anchored after a specific line number. " +
-      "Author is automatically set to 'claude'. The annotation is an HTML comment invisible in rendered markdown. " +
-      "Optionally pass a version token (from a previous add_note or get_context notes) for line-number translation if the file changed.",
-    inputSchema: {
-      project: projectParam,
-      part_id: z.string().describe("Part identifier, e.g. 'part-01'"),
-      chapter_id: z.string().describe("Chapter identifier, e.g. 'chapter-03'"),
-      line_number: z.number().describe("Line number to insert annotation after (1-based)"),
-      type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).describe(
-        "Annotation type: 'note' (general), 'dev' (structural), 'line' (prose craft), 'continuity' (consistency), 'query' (question), 'flag' (wordless marker)"
-      ),
-      message: z.string().optional().describe(
-        "The annotation message. Required for all types except 'flag'."
-      ),
-      version: z.string().optional().describe(
-        "Version token from a previous add_note or get_context notes response. If the file changed since this version, line numbers are translated automatically. Omit on first insert."
-      ),
-    },
-  }, async ({ project, part_id, chapter_id, line_number, type, message, version }) => {
-    logToolCall("add_note", { project, part_id, chapter_id, line_number, type });
-    try {
-      if (type !== "flag" && !message) {
-        throw new Error(`Message is required for @${type} annotations.`);
-      }
-      const root = store.projectRoot(project);
-      const result = await store.insertAnnotation(
-        project, part_id, chapter_id, line_number,
-        type as "note" | "dev" | "line" | "continuity" | "query" | "flag",
-        message ?? null, "claude", version
-      );
-
-      // Commit the modified file
-      const relPath = result.path.startsWith(root)
-        ? result.path.slice(root.length + 1)
-        : result.path;
-      try {
-        await autoCommit(root, [relPath],
-          `Added @${type}(claude) annotation to ${part_id}/${chapter_id}`);
-      } catch (err) {
-        console.error(`[git-warning] Auto-commit failed:`,
-          err instanceof Error ? err.message : err);
-      }
-
-      // Get post-commit version
-      const { getFileVersion } = await import("./git.js");
-      const newVersion = await getFileVersion(root, relPath);
-
-      return jsonResult({
-        id: result.id,
-        inserted_after_line: result.inserted_after_line,
-        location: `${part_id}/${chapter_id}`,
-        version: newVersion,
-      });
-    } catch (err) {
-      logToolError("add_note", err);
-      throw err;
-    }
-  });
-
-  server.registerTool("resolve_notes", {
-    title: "Resolve Notes",
-    description:
-      "Batch-remove multiple inline annotations from prose files after they've been addressed. " +
-      "Pass note IDs from get_context with notes include.",
-    inputSchema: {
-      project: projectParam,
-      note_ids: z.array(z.string()).describe(
-        "Note IDs to resolve, e.g. ['part-01/chapter-03:b02:n47']. Get these from get_context with notes include."
-      ),
-    },
-  }, async ({ project, note_ids }) => {
-    logToolCall("resolve_notes", { project, count: note_ids.length });
-    try {
-      if (note_ids.length === 0) {
-        return textResult("No note IDs provided. Nothing to resolve.");
-      }
-      const root = store.projectRoot(project);
-      const results = await store.removeAnnotationLines(project, note_ids);
-      const files = results.map((r) =>
-        r.path.startsWith(root) ? r.path.slice(root.length + 1) : r.path
-      );
-      if (files.length > 0) {
-        try {
-          await autoCommit(root, files,
-            `Resolved ${note_ids.length} annotation(s)`);
-        } catch (err) {
-          console.error(`[git-warning] Auto-commit failed:`,
-            err instanceof Error ? err.message : err);
-        }
-      }
-      return jsonResult({ resolved: note_ids.length, files_modified: results.length });
-    } catch (err) {
-      logToolError("resolve_notes", err);
-      throw err;
-    }
-  });
-
-  // -----------------------------------------------------------------------
-  // Session tools
-  // -----------------------------------------------------------------------
+  // =========================================================================
+  // session_summary — standalone git operation
+  // =========================================================================
 
   server.registerTool("session_summary", {
     title: "Session Summary",
@@ -1141,9 +997,9 @@ async function createMcpServer(): Promise<McpServer> {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // Maintenance tools
-  // -----------------------------------------------------------------------
+  // =========================================================================
+  // refresh_summaries — maintenance/migration
+  // =========================================================================
 
   server.registerTool("refresh_summaries", {
     title: "Refresh Summary Comments",
@@ -1163,12 +1019,7 @@ async function createMcpServer(): Promise<McpServer> {
       if (!mdPath) {
         return textResult("All summary comments are already up to date.");
       }
-      const relPath = mdPath.startsWith(root) ? mdPath.slice(root.length + 1) : mdPath;
-      try {
-        await autoCommit(root, [relPath], `Refreshed beat summaries in ${part_id}/${chapter_id}`);
-      } catch (err) {
-        console.error(`[git-warning] Auto-commit failed:`, err instanceof Error ? err.message : err);
-      }
+      await commitFiles(root, [mdPath], `Refreshed beat summaries in ${part_id}/${chapter_id}`);
       return textResult(`Refreshed beat summary comments in ${part_id}/${chapter_id}.md`);
     } catch (err) {
       logToolError("refresh_summaries", err);
@@ -1301,49 +1152,22 @@ app.get("/health", async () => {
 app.get("/help", async () => {
   return {
     name: "Fractal",
-    description: "Fractal narrative MCP server (multi-project)",
+    description: "Fractal narrative MCP server — 12 consolidated tools (multi-project)",
     projects_root: store.getProjectsRoot(),
-    note: "All tools except list_projects and list_templates require a 'project' parameter.",
+    note: "All tools except list_projects and template (list/get/save) require a 'project' parameter.",
     tools: {
-      management: {
-        list_projects: "List all available projects (id, title, status).",
-        create_project: "Bootstrap a new project with all directories and starter files. Accepts optional template param.",
-        create_part: "Create a new part directory with part.json, add to project parts list.",
-        create_chapter: "Create a new chapter (.md + .meta.json) inside a part, add to part chapters list.",
-        list_templates: "List available project templates (id, name, description).",
-        get_template: "Returns full template contents — canon types, themes, and guide text.",
-        update_template: "Create or update a template. Provide id, name, description, canon_types, themes, guide.",
-        apply_template: "Apply a template to an existing project — adds missing canon dirs, updates GUIDE.md.",
-      },
-      read: {
-        get_context: "Primary read tool — returns any combination of project data in one call. Supports: project_meta, parts, chapter_meta, chapter_prose (with version), beats, beat_variants, canon (with path notation for extended files), scratch, scratch_index, dirty_nodes, notes, canon_list, guide.",
-        search: "Full-text search across prose, canon, and scratch files.",
-      },
-      write: {
-        update_project: "Patch top-level project metadata.",
-        update_part: "Patch a part's metadata (title, summary, arc, status, chapters).",
-        update_chapter_meta: "Patch chapter metadata — beat summaries, status, deps. Also refreshes summary comments (chapter-brief + beat-briefs) in prose.",
-        write_beat_prose: "Insert or replace prose for a beat. With append=true, adds a variant block.",
-        edit_beat_prose: "Surgical str_replace within a beat's prose. Atomic, ordered edits.",
-        add_beat: "Add a new beat to a chapter (markdown marker + meta entry).",
-        remove_beat: "Remove a beat (all variant blocks) from a chapter. Prose moved to scratch.",
-        select_beat_variant: "Keep one variant of a beat, archive the rest to scratch.",
-        reorder_beats: "Reorder beats within a chapter (meta and prose). Variants stay grouped.",
-        mark_node: "Set dirty/clean status on a node. status='dirty' requires a reason.",
-        update_canon: "Create or rewrite a canon entry. Two-tier: brief (always loaded) + extended files (on demand). With extended_id, writes extended file and auto-migrates flat entries.",
-        add_scratch: "Add a new file to the scratch folder.",
-        promote_scratch: "Move scratch content into a beat in the narrative structure.",
-      },
-      annotations: {
-        add_note: "Insert annotation after a line number. Optionally pass version for line translation. Author: claude.",
-        resolve_notes: "Batch-remove one or more annotations by ID.",
-      },
-      session: {
-        session_summary: "Create a session-level git commit summarizing the working session.",
-      },
-      maintenance: {
-        refresh_summaries: "Regenerate all summary comments (chapter-brief + beat-briefs) in a chapter's prose file from the meta.",
-      },
+      list_projects: "List all available projects with status briefing.",
+      template: "Manage templates. action: list | get | save | apply. Only 'apply' needs a project param.",
+      get_context: "Primary read tool — returns any combination of project data in one call, including search. Supports: project_meta, parts, chapter_meta, chapter_prose, beats, beat_variants, canon (with # section notation), scratch, scratch_index, dirty_nodes, notes, canon_list, guide, search.",
+      create: "Create entities. target: project | part | chapter | beat | scratch | note.",
+      update: "Update metadata. target: project | part | chapter | node (dirty/clean).",
+      write: "Write/replace content. target: beat (prose or promote scratch) | canon.",
+      edit: "Surgical find/replace. target: beat | canon. Atomic ordered edits.",
+      remove: "Remove content. target: beat (prose → scratch) | notes (resolve annotations).",
+      select_variant: "Keep one variant of a beat, archive the rest to scratch.",
+      reorder_beats: "Reorder beats within a chapter. Meta and prose updated together.",
+      session_summary: "Create a session-level git commit summarizing the working session.",
+      refresh_summaries: "Regenerate chapter-brief and beat-brief comments from meta.",
     },
     architecture: {
       structure: "projects/{project}/ — project.json, parts/{part}/chapter-NN.md + .meta.json, canon/, scratch/",

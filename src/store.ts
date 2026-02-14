@@ -8,7 +8,7 @@
  * Every function takes a projectId as the first parameter.
  */
 
-import { readFile, writeFile, readdir, rename, mkdir, stat, unlink } from "node:fs/promises";
+import { readFile, writeFile, readdir, rename, mkdir, stat } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -805,33 +805,60 @@ export async function getBeatProse(
 }
 
 // ---------------------------------------------------------------------------
+// Canon path resolution — shared by getCanon, editCanon, updateCanon, etc.
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve canon paths when the type directory is already known.
+ * Checks directory format ({id}/brief.md) first, then flat ({id}.md).
+ */
+function resolveCanonPaths(
+  basePath: string,
+  id: string
+): { mdPath: string; metaPath: string } | null {
+  const dirBriefPath = join(basePath, id, "brief.md");
+  if (existsSync(dirBriefPath)) {
+    return { mdPath: dirBriefPath, metaPath: join(basePath, id, "meta.json") };
+  }
+  const flatMdPath = join(basePath, `${id}.md`);
+  if (existsSync(flatMdPath)) {
+    return { mdPath: flatMdPath, metaPath: join(basePath, `${id}.meta.json`) };
+  }
+  return null;
+}
+
+/**
+ * Find a canon entry when the type is unknown — scans all canon type dirs.
+ */
+async function findCanonEntry(
+  projectId: string,
+  id: string
+): Promise<{ mdPath: string; metaPath: string; type: string } | null> {
+  const root = projectRoot(projectId);
+  const types = await listCanonTypes(projectId);
+  for (const type of types) {
+    const paths = resolveCanonPaths(join(root, "canon", type), id);
+    if (paths) return { ...paths, type };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Canon reads
 // ---------------------------------------------------------------------------
 
-export async function getCanon(projectId: string, type: string, id: string): Promise<{ content: string; meta: unknown; extended_files: string[] }> {
+export async function getCanon(projectId: string, type: string, id: string): Promise<{ content: string; meta: unknown }> {
   const basePath = join(projectRoot(projectId), "canon", type);
-
-  // Directory format: {id}/brief.md
-  const dirBriefPath = join(basePath, id, "brief.md");
-  if (existsSync(dirBriefPath)) {
-    const content = await readMd(dirBriefPath);
-    let meta: unknown = null;
-    const metaPath = join(basePath, id, "meta.json");
-    if (existsSync(metaPath)) {
-      meta = await readJson(metaPath);
-    }
-    const extended = await listExtendedFiles(projectId, type, id);
-    return { content, meta, extended_files: extended };
+  const paths = resolveCanonPaths(basePath, id);
+  if (!paths) {
+    throw new Error(`Canon entry "${type}/${id}" not found`);
   }
-
-  // Flat format: {id}.md
-  const content = await readMd(join(basePath, `${id}.md`));
+  const content = await readMd(paths.mdPath);
   let meta: unknown = null;
-  const metaPath = join(basePath, `${id}.meta.json`);
-  if (existsSync(metaPath)) {
-    meta = await readJson(metaPath);
+  if (existsSync(paths.metaPath)) {
+    meta = await readJson(paths.metaPath);
   }
-  return { content, meta, extended_files: [] };
+  return { content, meta };
 }
 
 export async function listCanon(projectId: string, type: string): Promise<string[]> {
@@ -867,28 +894,6 @@ export async function listCanonTypes(projectId: string): Promise<string[]> {
     .sort();
 }
 
-export async function listExtendedFiles(projectId: string, type: string, id: string): Promise<string[]> {
-  const dir = join(projectRoot(projectId), "canon", type, id);
-  if (!existsSync(dir)) return [];
-  const entries = await readdir(dir);
-  return entries
-    .filter((f) => f.endsWith(".md") && f !== "brief.md" && !shouldIgnore(f))
-    .map((f) => f.replace(/\.md$/, ""))
-    .sort();
-}
-
-export async function getCanonExtended(projectId: string, type: string, id: string, extendedId: string): Promise<string> {
-  const dir = join(projectRoot(projectId), "canon", type, id);
-  const briefPath = join(dir, "brief.md");
-  if (!existsSync(briefPath)) {
-    throw new Error(`Canon entry "${type}/${id}" is not in directory format — no extended files available.`);
-  }
-  const extPath = join(dir, `${extendedId}.md`);
-  if (!existsSync(extPath)) {
-    throw new Error(`Extended file "${extendedId}" not found in canon/${type}/${id}/. Available: ${(await listExtendedFiles(projectId, type, id)).join(", ") || "(none)"}`);
-  }
-  return readMd(extPath);
-}
 
 // ---------------------------------------------------------------------------
 // Canon section parsing — lazy-load sections by slug
@@ -952,41 +957,19 @@ export function splitMarkdownSections(markdown: string): ParsedCanon {
 async function resolveCanon(
   projectId: string,
   id: string
-): Promise<{ content: string; meta: unknown; type: string; extended_files: string[]; sections: Array<{ name: string; id: string }> } | null> {
-  const root = projectRoot(projectId);
-  const types = await listCanonTypes(projectId);
-  for (const type of types) {
-    // Directory format: {type}/{id}/brief.md
-    const dirBriefPath = join(root, "canon", type, id, "brief.md");
-    if (existsSync(dirBriefPath)) {
-      const rawContent = await readMd(dirBriefPath);
-      let meta: unknown = null;
-      const metaPath = join(root, "canon", type, id, "meta.json");
-      if (existsSync(metaPath)) {
-        meta = await readJson(metaPath);
-      }
-      const extended = await listExtendedFiles(projectId, type, id);
-      const parsed = splitMarkdownSections(rawContent);
-      const content = parsed.sections.length > 0 ? parsed.topMatter : rawContent;
-      const sections = parsed.sections.map(s => ({ name: s.name, id: s.id }));
-      return { content, meta, type, extended_files: extended, sections };
-    }
-    // Flat format: {type}/{id}.md
-    const mdPath = join(root, "canon", type, `${id}.md`);
-    if (existsSync(mdPath)) {
-      const rawContent = await readMd(mdPath);
-      let meta: unknown = null;
-      const metaPath = join(root, "canon", type, `${id}.meta.json`);
-      if (existsSync(metaPath)) {
-        meta = await readJson(metaPath);
-      }
-      const parsed = splitMarkdownSections(rawContent);
-      const content = parsed.sections.length > 0 ? parsed.topMatter : rawContent;
-      const sections = parsed.sections.map(s => ({ name: s.name, id: s.id }));
-      return { content, meta, type, extended_files: [], sections };
-    }
+): Promise<{ content: string; meta: unknown; type: string; sections: Array<{ name: string; id: string }> } | null> {
+  const entry = await findCanonEntry(projectId, id);
+  if (!entry) return null;
+
+  const rawContent = await readMd(entry.mdPath);
+  let meta: unknown = null;
+  if (existsSync(entry.metaPath)) {
+    meta = await readJson(entry.metaPath);
   }
-  return null;
+  const parsed = splitMarkdownSections(rawContent);
+  const content = parsed.sections.length > 0 ? parsed.topMatter : rawContent;
+  const sections = parsed.sections.map(s => ({ name: s.name, id: s.id }));
+  return { content, meta, type: entry.type, sections };
 }
 
 async function getCanonSection(
@@ -994,35 +977,18 @@ async function getCanonSection(
   entryId: string,
   sectionId: string
 ): Promise<{ content: string; type: string }> {
-  const root = projectRoot(projectId);
-  const types = await listCanonTypes(projectId);
-  for (const type of types) {
-    // Directory format
-    const dirBriefPath = join(root, "canon", type, entryId, "brief.md");
-    if (existsSync(dirBriefPath)) {
-      const rawContent = await readMd(dirBriefPath);
-      const parsed = splitMarkdownSections(rawContent);
-      const section = parsed.sections.find(s => s.id === sectionId);
-      if (!section) {
-        const available = parsed.sections.map(s => s.id).join(", ");
-        throw new Error(`Section '${sectionId}' not found in ${entryId}. Available: ${available || "(none)"}`);
-      }
-      return { content: section.content, type };
-    }
-    // Flat format
-    const mdPath = join(root, "canon", type, `${entryId}.md`);
-    if (existsSync(mdPath)) {
-      const rawContent = await readMd(mdPath);
-      const parsed = splitMarkdownSections(rawContent);
-      const section = parsed.sections.find(s => s.id === sectionId);
-      if (!section) {
-        const available = parsed.sections.map(s => s.id).join(", ");
-        throw new Error(`Section '${sectionId}' not found in ${entryId}. Available: ${available || "(none)"}`);
-      }
-      return { content: section.content, type };
-    }
+  const entry = await findCanonEntry(projectId, entryId);
+  if (!entry) {
+    throw new Error(`Canon entry "${entryId}" not found in any canon type`);
   }
-  throw new Error(`Canon entry "${entryId}" not found in any canon type`);
+  const rawContent = await readMd(entry.mdPath);
+  const parsed = splitMarkdownSections(rawContent);
+  const section = parsed.sections.find(s => s.id === sectionId);
+  if (!section) {
+    const available = parsed.sections.map(s => s.id).join(", ");
+    throw new Error(`Section '${sectionId}' not found in ${entryId}. Available: ${available || "(none)"}`);
+  }
+  return { content: section.content, type: entry.type };
 }
 
 function parseChapterRef(ref: string): { partId: string; chapterId: string } {
@@ -1976,7 +1942,23 @@ export async function getContext(
   const response: Record<string, unknown> = {};
   const errors: Record<string, string> = {};
 
-  // Canon — resolve type automatically; supports # for sections and / for extended files
+  async function fetchAll<T>(
+    refs: string[],
+    fetcher: (ref: string) => Promise<T>,
+    key: string,
+  ): Promise<void> {
+    const result: Record<string, T> = {};
+    await Promise.all(refs.map(async (ref) => {
+      try {
+        result[ref] = await fetcher(ref);
+      } catch (err) {
+        errors[`${key}:${ref}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(result).length > 0) response[key] = result;
+  }
+
+  // Canon — resolve type automatically; supports # for section-level lazy loading
   if (include.canon && include.canon.length > 0) {
     const canon: Record<string, unknown> = {};
     await Promise.all(include.canon.map(async (ref) => {
@@ -1990,27 +1972,22 @@ export async function getContext(
           canon[ref] = { content: result.content, type: result.type };
           return;
         }
-        // Path notation: "unit-7/voice-samples" → entry "unit-7", extended file "voice-samples"
-        const slashIdx = ref.indexOf("/");
-        if (slashIdx !== -1) {
-          const entryId = ref.slice(0, slashIdx);
-          const extendedId = ref.slice(slashIdx + 1);
-          // First resolve to find the type
-          const resolved = await resolveCanon(projectId, entryId);
-          if (!resolved) {
-            errors[`canon:${ref}`] = `Canon entry "${entryId}" not found in any canon type`;
-            return;
-          }
-          const content = await getCanonExtended(projectId, resolved.type, entryId, extendedId);
-          canon[ref] = { content, type: resolved.type };
-        } else {
-          // Summary + TOC fetch
-          const result = await resolveCanon(projectId, ref);
-          if (result) {
-            canon[ref] = result;
+        // Summary + TOC fetch
+        const result = await resolveCanon(projectId, ref);
+        if (result) {
+          // When sections exist, add fetch hints so agents know how to drill down
+          if (result.sections.length > 0) {
+            const enriched = {
+              ...result,
+              sections: result.sections.map(s => ({ ...s, fetch: `${ref}#${s.id}` })),
+              _hint: `Only top-matter is shown. To fetch a section, include '${ref}#<section-id>' in the canon array.`,
+            };
+            canon[ref] = enriched;
           } else {
-            errors[`canon:${ref}`] = `Canon entry "${ref}" not found in any canon type`;
+            canon[ref] = result;
           }
+        } else {
+          errors[`canon:${ref}`] = `Canon entry "${ref}" not found in any canon type`;
         }
       } catch (err) {
         errors[`canon:${ref}`] = err instanceof Error ? err.message : String(err);
@@ -2020,43 +1997,21 @@ export async function getContext(
   }
 
   // Scratch files
-  if (include.scratch && include.scratch.length > 0) {
-    const scratch: Record<string, string> = {};
-    await Promise.all(include.scratch.map(async (filename) => {
-      try {
-        scratch[filename] = await getScratch(projectId, filename);
-      } catch (err) {
-        errors[`scratch:${filename}`] = err instanceof Error ? err.message : String(err);
-      }
-    }));
-    if (Object.keys(scratch).length > 0) response.scratch = scratch;
+  if (include.scratch?.length) {
+    await fetchAll(include.scratch, (f) => getScratch(projectId, f), "scratch");
   }
 
   // Parts
-  if (include.parts && include.parts.length > 0) {
-    const parts: Record<string, unknown> = {};
-    await Promise.all(include.parts.map(async (partId) => {
-      try {
-        parts[partId] = await getPart(projectId, partId);
-      } catch (err) {
-        errors[`parts:${partId}`] = err instanceof Error ? err.message : String(err);
-      }
-    }));
-    if (Object.keys(parts).length > 0) response.parts = parts;
+  if (include.parts?.length) {
+    await fetchAll(include.parts, (id) => getPart(projectId, id), "parts");
   }
 
   // Chapter meta
-  if (include.chapter_meta && include.chapter_meta.length > 0) {
-    const chapterMeta: Record<string, unknown> = {};
-    await Promise.all(include.chapter_meta.map(async (ref) => {
-      try {
-        const { partId, chapterId } = parseChapterRef(ref);
-        chapterMeta[ref] = await getChapterMeta(projectId, partId, chapterId);
-      } catch (err) {
-        errors[`chapter_meta:${ref}`] = err instanceof Error ? err.message : String(err);
-      }
-    }));
-    if (Object.keys(chapterMeta).length > 0) response.chapter_meta = chapterMeta;
+  if (include.chapter_meta?.length) {
+    await fetchAll(include.chapter_meta, async (ref) => {
+      const { partId, chapterId } = parseChapterRef(ref);
+      return getChapterMeta(projectId, partId, chapterId);
+    }, "chapter_meta");
   }
 
   // Chapter prose — returns { prose, version } to match get_chapter_prose tool
@@ -2079,32 +2034,19 @@ export async function getContext(
   }
 
   // Individual beats
-  if (include.beats && include.beats.length > 0) {
-    const beats: Record<string, unknown> = {};
-    await Promise.all(include.beats.map(async (ref) => {
-      try {
-        const { partId, chapterId, beatId } = parseBeatRef(ref);
-        beats[ref] = await getBeatProse(projectId, partId, chapterId, beatId);
-      } catch (err) {
-        errors[`beats:${ref}`] = err instanceof Error ? err.message : String(err);
-      }
-    }));
-    if (Object.keys(beats).length > 0) response.beats = beats;
+  if (include.beats?.length) {
+    await fetchAll(include.beats, async (ref) => {
+      const { partId, chapterId, beatId } = parseBeatRef(ref);
+      return getBeatProse(projectId, partId, chapterId, beatId);
+    }, "beats");
   }
 
   // Beat variants
-  if (include.beat_variants && include.beat_variants.length > 0) {
-    const beatVariants: Record<string, unknown> = {};
-    await Promise.all(include.beat_variants.map(async (ref) => {
-      try {
-        const { partId, chapterId, beatId } = parseBeatRef(ref);
-        const result = await getBeatVariants(projectId, partId, chapterId, beatId);
-        beatVariants[ref] = result.variants;
-      } catch (err) {
-        errors[`beat_variants:${ref}`] = err instanceof Error ? err.message : String(err);
-      }
-    }));
-    if (Object.keys(beatVariants).length > 0) response.beat_variants = beatVariants;
+  if (include.beat_variants?.length) {
+    await fetchAll(include.beat_variants, async (ref) => {
+      const { partId, chapterId, beatId } = parseBeatRef(ref);
+      return (await getBeatVariants(projectId, partId, chapterId, beatId)).variants;
+    }, "beat_variants");
   }
 
   // Dirty nodes
@@ -2183,6 +2125,52 @@ export async function getContext(
 }
 
 // ---------------------------------------------------------------------------
+// Surgical string editing — shared by beat prose and canon edits
+// ---------------------------------------------------------------------------
+
+function applyEdits(
+  text: string,
+  edits: { old_str: string; new_str: string }[],
+  ref: string
+): { text: string; changes: { old_str: string; new_str: string; context: string }[] } {
+  const changes: { old_str: string; new_str: string; context: string }[] = [];
+
+  for (const edit of edits) {
+    const firstIdx = text.indexOf(edit.old_str);
+    if (firstIdx === -1) {
+      const preview = edit.old_str.length > 100 ? edit.old_str.slice(0, 100) + "..." : edit.old_str;
+      throw new Error(`No match for old_str in ${ref}: "${preview}"`);
+    }
+
+    const secondIdx = text.indexOf(edit.old_str, firstIdx + 1);
+    if (secondIdx !== -1) {
+      let count = 2;
+      let searchFrom = secondIdx + 1;
+      while (true) {
+        const nextIdx = text.indexOf(edit.old_str, searchFrom);
+        if (nextIdx === -1) break;
+        count++;
+        searchFrom = nextIdx + 1;
+      }
+      const preview = edit.old_str.length > 100 ? edit.old_str.slice(0, 100) + "..." : edit.old_str;
+      throw new Error(
+        `old_str matches ${count} locations in ${ref}. Include more context to make it unique: "${preview}"`
+      );
+    }
+
+    const before = text.slice(Math.max(0, firstIdx - 50), firstIdx);
+    const afterStart = firstIdx + edit.old_str.length;
+    const after = text.slice(afterStart, afterStart + 50);
+    const context = `...${before}${edit.new_str}${after}...`;
+
+    text = text.slice(0, firstIdx) + edit.new_str + text.slice(firstIdx + edit.old_str.length);
+    changes.push({ old_str: edit.old_str, new_str: edit.new_str, context });
+  }
+
+  return { text, changes };
+}
+
+// ---------------------------------------------------------------------------
 // Surgical beat prose editing
 // ---------------------------------------------------------------------------
 
@@ -2232,45 +2220,9 @@ export async function editBeatProse(
     };
   }
 
-  // Work on a copy of the prose text — nothing touches disk until all edits pass
+  // Apply edits atomically — nothing touches disk until all pass
   const target = variantEntries[variantIndex]!;
-  let text = target.block.prose;
-  const changes: { old_str: string; new_str: string; context: string }[] = [];
-
-  for (const edit of edits) {
-    const firstIdx = text.indexOf(edit.old_str);
-    if (firstIdx === -1) {
-      const preview = edit.old_str.length > 100 ? edit.old_str.slice(0, 100) + "..." : edit.old_str;
-      throw new Error(`No match for old_str in beat ${beatId}: "${preview}"`);
-    }
-
-    // Check for duplicate matches
-    const secondIdx = text.indexOf(edit.old_str, firstIdx + 1);
-    if (secondIdx !== -1) {
-      // Count total occurrences
-      let count = 2;
-      let searchFrom = secondIdx + 1;
-      while (true) {
-        const nextIdx = text.indexOf(edit.old_str, searchFrom);
-        if (nextIdx === -1) break;
-        count++;
-        searchFrom = nextIdx + 1;
-      }
-      const preview = edit.old_str.length > 100 ? edit.old_str.slice(0, 100) + "..." : edit.old_str;
-      throw new Error(
-        `old_str matches ${count} locations in beat ${beatId}. Include more context to make it unique: "${preview}"`
-      );
-    }
-
-    // Apply the replacement
-    const before = text.slice(Math.max(0, firstIdx - 50), firstIdx);
-    const afterStart = firstIdx + edit.old_str.length;
-    const after = text.slice(afterStart, afterStart + 50);
-    const context = `...${before}${edit.new_str}${after}...`;
-
-    text = text.slice(0, firstIdx) + edit.new_str + text.slice(firstIdx + edit.old_str.length);
-    changes.push({ old_str: edit.old_str, new_str: edit.new_str, context });
-  }
+  const { text, changes } = applyEdits(target.block.prose, edits, `beat ${beatId}`);
 
   // All edits passed — update the block and write to disk
   parsed.blocks[target.idx]! = { ...target.block, prose: text };
@@ -2284,85 +2236,46 @@ export async function editBeatProse(
   };
 }
 
-export async function markDirty(projectId: string, nodeRef: string, reason: string): Promise<WriteResult[]> {
+export async function setNodeStatus(
+  projectId: string,
+  nodeRef: string,
+  status: "dirty" | "clean",
+  reason?: string
+): Promise<WriteResult[]> {
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
   const parts = nodeRef.split("/");
   const partId = parts[0]!;
+  const isDirty = status === "dirty";
+  const desc = isDirty ? `dirty: ${reason}` : "clean";
 
   if (parts.length === 1) {
     const part = await getPart(projectId, partId);
-    part.status = "dirty";
-    part.dirty_reason = reason;
+    part.status = isDirty ? "dirty" : "clean";
+    part.dirty_reason = isDirty ? reason! : null;
     const path = join(root, "parts", partId, "part.json");
     await writeJson(path, part);
-    results.push({ path, description: `Marked ${partId} dirty: ${reason}` });
+    results.push({ path, description: `Marked ${partId} ${desc}` });
   } else {
     const chapterBeat = parts[1]!;
     const [chapterId, beatId] = chapterBeat.split(":");
 
     if (!beatId) {
       const meta = await getChapterMeta(projectId, partId, chapterId!);
-      meta.status = "dirty";
-      meta.dirty_reason = reason;
+      meta.status = isDirty ? "dirty" : "clean";
+      meta.dirty_reason = isDirty ? reason! : null;
       const path = join(root, "parts", partId, `${chapterId}.meta.json`);
       await writeJson(path, meta);
-      results.push({ path, description: `Marked ${partId}/${chapterId} dirty: ${reason}` });
+      results.push({ path, description: `Marked ${partId}/${chapterId} ${desc}` });
     } else {
       const meta = await getChapterMeta(projectId, partId, chapterId!);
       const beat = meta.beats.find((b) => b.id === beatId);
       if (beat) {
-        beat.status = "dirty";
-        beat.dirty_reason = reason;
+        beat.status = isDirty ? "dirty" : "written";
+        beat.dirty_reason = isDirty ? reason! : null;
         const path = join(root, "parts", partId, `${chapterId}.meta.json`);
         await writeJson(path, meta);
-        results.push({ path, description: `Marked ${partId}/${chapterId}:${beatId} dirty: ${reason}` });
-        // Refresh beat-brief comment to show dirty status
-        const mdPath = await refreshSummaryComments(projectId, partId, chapterId!);
-        if (mdPath) {
-          results.push({ path: mdPath, description: `Refreshed beat summaries in ${chapterId}.md` });
-        }
-      }
-    }
-  }
-
-  return results;
-}
-
-export async function markClean(projectId: string, nodeRef: string): Promise<WriteResult[]> {
-  const root = projectRoot(projectId);
-  const results: WriteResult[] = [];
-  const parts = nodeRef.split("/");
-  const partId = parts[0]!;
-
-  if (parts.length === 1) {
-    const part = await getPart(projectId, partId);
-    part.status = "clean";
-    part.dirty_reason = null;
-    const path = join(root, "parts", partId, "part.json");
-    await writeJson(path, part);
-    results.push({ path, description: `Marked ${partId} clean` });
-  } else {
-    const chapterBeat = parts[1]!;
-    const [chapterId, beatId] = chapterBeat.split(":");
-
-    if (!beatId) {
-      const meta = await getChapterMeta(projectId, partId, chapterId!);
-      meta.status = "clean";
-      meta.dirty_reason = null;
-      const path = join(root, "parts", partId, `${chapterId}.meta.json`);
-      await writeJson(path, meta);
-      results.push({ path, description: `Marked ${partId}/${chapterId} clean` });
-    } else {
-      const meta = await getChapterMeta(projectId, partId, chapterId!);
-      const beat = meta.beats.find((b) => b.id === beatId);
-      if (beat) {
-        beat.status = "written";
-        beat.dirty_reason = null;
-        const path = join(root, "parts", partId, `${chapterId}.meta.json`);
-        await writeJson(path, meta);
-        results.push({ path, description: `Marked ${partId}/${chapterId}:${beatId} clean` });
-        // Refresh beat-brief comment to show clean status
+        results.push({ path, description: `Marked ${partId}/${chapterId}:${beatId} ${desc}` });
         const mdPath = await refreshSummaryComments(projectId, partId, chapterId!);
         if (mdPath) {
           results.push({ path: mdPath, description: `Refreshed beat summaries in ${chapterId}.md` });
@@ -2379,8 +2292,7 @@ export async function updateCanon(
   type: string,
   id: string,
   content: string,
-  meta?: unknown,
-  extendedId?: string
+  meta?: unknown
 ): Promise<WriteResult[]> {
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
@@ -2390,72 +2302,62 @@ export async function updateCanon(
     await mkdir(basePath, { recursive: true });
   }
 
-  const dirPath = join(basePath, id);
-  const dirBriefPath = join(dirPath, "brief.md");
-  const flatMdPath = join(basePath, `${id}.md`);
-  const isDirectory = existsSync(dirBriefPath);
-  const isFlat = existsSync(flatMdPath);
+  const existing = resolveCanonPaths(basePath, id);
+  const mdPath = existing?.mdPath ?? join(basePath, `${id}.md`);
+  const metaPath = existing?.metaPath ?? join(basePath, `${id}.meta.json`);
+  const isDir = existing ? mdPath.endsWith("brief.md") : false;
+  const label = isDir ? `canon/${type}/${id}/brief.md` : `canon/${type}/${id}.md`;
+  const metaLabel = isDir ? `canon/${type}/${id}/meta.json` : `canon/${type}/${id}.meta.json`;
 
-  if (!extendedId) {
-    // Writing the brief
-    if (isDirectory) {
-      // Directory format: write brief.md
-      await writeMd(dirBriefPath, content);
-      results.push({ path: dirBriefPath, description: `Updated canon/${type}/${id}/brief.md` });
-      if (meta) {
-        const metaPath = join(dirPath, "meta.json");
-        await writeJson(metaPath, meta);
-        results.push({ path: metaPath, description: `Updated canon/${type}/${id}/meta.json` });
-      }
-    } else {
-      // Flat format (or new entry)
-      await writeMd(flatMdPath, content);
-      results.push({ path: flatMdPath, description: `Updated canon/${type}/${id}.md` });
-      if (meta) {
-        const metaPath = join(basePath, `${id}.meta.json`);
-        await writeJson(metaPath, meta);
-        results.push({ path: metaPath, description: `Updated canon/${type}/${id}.meta.json` });
-      }
-    }
-  } else {
-    // Writing an extended file
-    if (isFlat) {
-      // Auto-migrate from flat to directory format
-      await mkdir(dirPath, { recursive: true });
-
-      // Move {id}.md → {id}/brief.md
-      const flatContent = await readMd(flatMdPath);
-      await writeMd(dirBriefPath, flatContent);
-      await unlink(flatMdPath);
-      results.push({ path: dirBriefPath, description: `Migrated canon/${type}/${id}.md → ${id}/brief.md` });
-
-      // Move {id}.meta.json → {id}/meta.json if it exists
-      const flatMetaPath = join(basePath, `${id}.meta.json`);
-      if (existsSync(flatMetaPath)) {
-        const metaContent = await readJson(flatMetaPath);
-        await writeJson(join(dirPath, "meta.json"), metaContent);
-        await unlink(flatMetaPath);
-        results.push({ path: join(dirPath, "meta.json"), description: `Migrated canon/${type}/${id}.meta.json → ${id}/meta.json` });
-      }
-    } else if (!isDirectory) {
-      // New entry: create directory format from scratch
-      await mkdir(dirPath, { recursive: true });
-      // Write the content as the brief
-      await writeMd(dirBriefPath, content);
-      results.push({ path: dirBriefPath, description: `Created canon/${type}/${id}/brief.md` });
-      if (meta) {
-        await writeJson(join(dirPath, "meta.json"), meta);
-        results.push({ path: join(dirPath, "meta.json"), description: `Created canon/${type}/${id}/meta.json` });
-      }
-    }
-
-    // Write the extended file
-    const extPath = join(dirPath, `${extendedId}.md`);
-    await writeMd(extPath, content);
-    results.push({ path: extPath, description: `Updated canon/${type}/${id}/${extendedId}.md` });
+  await writeMd(mdPath, content);
+  results.push({ path: mdPath, description: `Updated ${label}` });
+  if (meta) {
+    await writeJson(metaPath, meta);
+    results.push({ path: metaPath, description: `Updated ${metaLabel}` });
   }
 
   return results;
+}
+
+export async function editCanon(
+  projectId: string,
+  type: string,
+  id: string,
+  edits: { old_str: string; new_str: string }[]
+): Promise<{
+  result: WriteResult;
+  edits_applied: number;
+  changes: { old_str: string; new_str: string; context: string }[];
+}> {
+  const root = projectRoot(projectId);
+  const basePath = join(root, "canon", type);
+  const paths = resolveCanonPaths(basePath, id);
+  if (!paths) {
+    throw new Error(`Canon entry "${type}/${id}" not found`);
+  }
+  const mdPath = paths.mdPath;
+
+  // Empty edits → no-op
+  if (edits.length === 0) {
+    return {
+      result: { path: mdPath, description: `No edits applied to canon/${type}/${id}` },
+      edits_applied: 0,
+      changes: [],
+    };
+  }
+
+  // Read and apply edits atomically
+  const raw = await readMd(mdPath);
+  const { text, changes } = applyEdits(raw, edits, `canon/${type}/${id}`);
+
+  // All edits passed — write to disk
+  await writeMd(mdPath, text);
+
+  return {
+    result: { path: mdPath, description: `Applied ${edits.length} edit(s) to canon/${type}/${id}` },
+    edits_applied: edits.length,
+    changes,
+  };
 }
 
 export async function addScratch(

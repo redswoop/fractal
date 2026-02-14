@@ -423,67 +423,71 @@ The `[auto]` commits happen per-operation. The `[session]` commits are summaries
 
 ## How Claude Interacts With All This (MCP Tools)
 
-The MCP server exposes 28 tools. I call them from conversation.
+The MCP server exposes **12 consolidated tools**. Six verb-based tools (`create`, `update`, `write`, `edit`, `remove`, `template`) use a discriminator parameter (`target` or `action`) to dispatch to the right operation. This keeps the API small while covering all object types uniformly.
 
-### Project & template management (6 tools)
+### `list_projects` — Entry point
 - `list_projects()` → list all projects with status briefing (dirty nodes, open notes, last session)
-- `create_project(project, title, template?)` → bootstrap a new project with directories, starter files, git init
-- `list_templates()` → list available project templates
-- `get_template(template_id)` → return full template contents (canon types, themes, guide)
-- `update_template(template_id, name, description, canon_types, ...)` → create or update a template
-- `apply_template(project, template_id)` → apply/re-apply a template to an existing project
 
-### Structure creation (2 tools)
-- `create_part(project, part_id, title, ...)` → create a new part directory with part.json
-- `create_chapter(project, part_id, chapter_id, title, ...)` → create a new chapter (prose .md + .meta.json)
+### `template` — Template management (action discriminator)
+- `template(action="list")` → list available project templates
+- `template(action="get", template_id)` → return full template contents (canon types, themes, guide)
+- `template(action="save", template_id, name, description, canon_types, ...)` → create or update a template
+- `template(action="apply", project, template_id)` → apply/re-apply a template to an existing project
 
-### Read operations (2 tools)
-- `get_context(include)` → primary read tool. Returns any combination of:
-  - `project_meta` — project.json enriched with `canon_types_active` and `has_guide`
-  - `parts` — part metadata by ID
-  - `chapter_meta` — chapter metadata by ref (`part-01/chapter-01`)
-  - `chapter_prose` — full prose with version token (`{prose, version}`)
-  - `beats` — individual beat prose by ref (`part-01/chapter-01:b01`)
-  - `beat_variants` — all variant blocks for a beat
-  - `canon` — canon entries by ID (type auto-resolved). Returns summary + sections TOC. Use `#` for section fetch: `emmy#voice-personality`
-  - `scratch` — scratch file content by filename
-  - `scratch_index` — scratch folder index
-  - `dirty_nodes` — all nodes flagged dirty/conflict
-  - `notes` — inline annotations with scope/type/author filters
-  - `canon_list` — list canon types (boolean) or entries within a type (string)
-  - `guide` — GUIDE.md content
-- `search(query, scope?)` → full-text search across prose, canon, scratch
+### `get_context` — Primary read tool
+Returns any combination of project data in one call via the `include` object:
+- `project_meta` — project.json enriched with `canon_types_active` and `has_guide`
+- `parts` — part metadata by ID
+- `chapter_meta` — chapter metadata by ref (`part-01/chapter-01`)
+- `chapter_prose` — full prose with version token (`{prose, version}`)
+- `beats` — individual beat prose by ref (`part-01/chapter-01:b01`)
+- `beat_variants` — all variant blocks for a beat
+- `canon` — canon entries by ID (type auto-resolved). Returns summary + sections TOC. Use `#` for section fetch: `emmy#voice-personality`
+- `scratch` — scratch file content by filename
+- `scratch_index` — scratch folder index
+- `dirty_nodes` — all nodes flagged dirty/conflict
+- `notes` — inline annotations with scope/type/author filters
+- `canon_list` — list canon types (boolean) or entries within a type (string)
+- `guide` — GUIDE.md content
+- `search` — `{query, scope?}` full-text search across prose, canon, scratch (replaces the old standalone `search` tool)
 
-### Metadata updates (3 tools)
-- `update_project(patch)` → update top-level metadata
-- `update_part(part_id, patch)` → update part summary/arc/status
-- `update_chapter_meta(part_id, chapter_id, patch)` → update beat summaries, status, deps
+### `create` — Create any object (target discriminator)
+- `create(target="project", project, title, template?)` → bootstrap a new project with directories, starter files, git init
+- `create(target="part", project, part_id, title, ...)` → create a new part directory with part.json
+- `create(target="chapter", project, part_id, chapter_id, title, ...)` → create a new chapter (prose .md + .meta.json)
+- `create(target="beat", project, part_id, chapter_id, beat, after_beat_id?)` → add a new beat to the structure
+- `create(target="scratch", project, filename, content, note, ...)` → toss something in the scratch folder
+- `create(target="note", project, part_id, chapter_id, line_number, note_type, message?)` → insert inline annotation
 
-### Prose operations (2 tools)
-- `write_beat_prose(part_id, chapter_id, beat_id, content)` → insert/replace prose for a beat
-- `edit_beat_prose(part_id, chapter_id, beat_id, edits)` → surgical string replacements within a beat
+### `update` — Update metadata (target discriminator)
+- `update(target="project", project, patch)` → update top-level metadata
+- `update(target="part", project, part_id, patch)` → update part summary/arc/status
+- `update(target="chapter", project, part_id, chapter_id, patch)` → update beat summaries, status, deps
+- `update(target="node", project, node_ref, mark, reason?)` → set dirty/clean status on a node
 
-### Beat structure (4 tools)
-- `add_beat(part_id, chapter_id, beat_def)` → add a new beat to the structure
-- `remove_beat(part_id, chapter_id, beat_id)` → remove a beat (prose moves to scratch)
-- `select_beat_variant(part_id, chapter_id, beat_id, keep_index)` → keep one variant, archive rest
-- `reorder_beats(part_id, chapter_id, beat_order)` → reorder beats in a chapter
+### `write` — Write or replace content (target discriminator)
+- `write(target="beat", project, part_id, chapter_id, beat_id, content, append?)` → insert/replace prose for a beat
+- `write(target="beat", project, part_id, chapter_id, beat_id, source_scratch)` → promote scratch content into a beat
+- `write(target="canon", project, type, id, content, meta?)` → write canon entry markdown (replaces entire file)
 
-### Canon (2 tools)
-- `update_canon(type, id, content)` → write canon entry markdown (replaces entire file)
-- `edit_canon(type, id, edits)` → surgical string replacements within a canon entry
+### `edit` — Surgical string replacements (target discriminator)
+- `edit(target="beat", project, part_id, chapter_id, beat_id, edits, variant_index?)` → find/replace within a beat's prose
+- `edit(target="canon", project, type, id, edits)` → find/replace within a canon entry
 
-### State & annotations (3 tools)
-- `mark_node(node_ref, status, reason?)` → set dirty/clean status on a node
-- `add_note(part_id, chapter_id, line_number, type, message?)` → insert inline annotation
-- `resolve_notes(note_ids)` → batch-remove annotations by ID
+### `remove` — Delete objects (target discriminator)
+- `remove(target="beat", project, part_id, chapter_id, beat_id)` → remove a beat (prose moves to scratch)
+- `remove(target="notes", project, note_ids)` → batch-remove annotations by ID
 
-### Scratch (2 tools)
-- `add_scratch(filename, content, note)` → toss something in the scratch folder
-- `promote_scratch(filename, target)` → move scratch content into the narrative structure
+### `select_variant` — Pick a beat variant
+- `select_variant(project, part_id, chapter_id, beat_id, keep_index)` → keep one variant, archive rest to scratch
 
-### Maintenance (2 tools)
+### `reorder_beats` — Reorder beats in a chapter
+- `reorder_beats(project, part_id, chapter_id, beat_order)` → reorder beats; prose and briefs travel with their beats
+
+### `session_summary` — Session-level git commit
 - `session_summary(project, message)` → create a session-level git commit summarizing work done
+
+### `refresh_summaries` — Regenerate brief comments
 - `refresh_summaries(project, part_id, chapter_id)` → regenerate chapter-brief and beat-brief comments from meta
 
 ### Every write operation triggers a git commit.
