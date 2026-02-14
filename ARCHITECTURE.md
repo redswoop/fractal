@@ -353,6 +353,15 @@ Learning to bake. Town divided on her presence. Growing attached to Marguerite.
 
 The `appears_in` list is what lets me answer "where does Unit 7 show up?" without scanning every file. I maintain this as we work. The tool can also rebuild it by scanning beat markers if it ever gets out of sync.
 
+### Meta as Index
+
+The meta sidecar is **derived navigation data**, not writing content. It exists so the tool can answer "where does X appear?" and "what type is Y?" without scanning every file.
+
+- **What goes in meta**: `appears_in`, `role`, `type`, `last_updated`, `updated_by` — fields the tool needs for indexing and navigation
+- **What goes in markdown**: Everything a human writing a scene would need — personality, voice, appearance, arc, constraints, relationships
+- **`appears_in` is manually maintained** — updated as we work, no auto-sync currently. If it drifts from reality, the markdown is always right
+- **If meta disappeared**, the story is fully intact. If the markdown disappeared, you've lost real writing. That asymmetry is the design
+
 ---
 
 ## The Scratch Folder

@@ -263,12 +263,18 @@ async function createMcpServer(): Promise<McpServer> {
     "These are auto-managed — refreshed on writes to beats or meta. " +
     "For chapters missing these comments (created before this feature), call refresh_summaries once per chapter at session start.",
     "",
+    "Canon design philosophy: Markdown is the source of truth for everything that matters for writing. " +
+    "If this tool vanishes, every canon file is still readable prose — that's ejectability. " +
+    "The meta sidecar (.meta.json / meta.json) is an index layer only: appears_in, role, type, last_updated. " +
+    "Navigation data for the tool. Never put writing-relevant content (personality, voice, appearance, arc, constraints) only in meta. " +
+    "Rule of thumb: if a human writing a scene would need it, it goes in the markdown. If only the tool needs it to answer 'where does X appear?', it goes in meta.",
+    "",
     "Canon loading: Canon entries return a brief (lean working state) plus an `extended_files` listing. " +
-    "Load briefs only by default — they contain enough context for most beats. " +
-    "Only load extended files (e.g. 'elena/voice-samples') when you specifically need that depth: " +
+    "The brief is the working state — identity, voice, current state, goals, key dynamics. Enough for most scenes. " +
+    "Only load extended files (e.g. 'elena/voice-samples') when the scene specifically needs that depth: " +
     "writing dialogue that needs voice calibration, a scene that hinges on backstory details, " +
     "or resolving a relationship dynamic that the brief only sketches. " +
-    "Never bulk-load all extended files preemptively.",
+    "Never bulk-load all extended files.",
     "",
     "Current projects:",
     projectLines,
@@ -912,6 +918,8 @@ async function createMcpServer(): Promise<McpServer> {
     description:
       "Create or rewrite a canon entry. Two-tier system: each entry has a brief (always loaded, cheap) " +
       "and optional extended files (loaded on demand via get_context path notation). " +
+      "The markdown brief holds everything relevant for writing (identity, voice, arc, relationships). " +
+      "The meta sidecar holds only navigation data (role, appears_in, timestamps). " +
       "Without extended_id, writes the brief. With extended_id, writes an extended file and " +
       "auto-migrates flat entries to directory format if needed.",
     inputSchema: {
@@ -926,7 +934,7 @@ async function createMcpServer(): Promise<McpServer> {
         appears_in: z.array(z.string()).optional().describe("Beat refs, e.g. ['part-01/chapter-01:b01']"),
         last_updated: z.string().optional().describe("ISO timestamp"),
         updated_by: z.string().optional().describe("e.g. 'claude-conversation'"),
-      }).passthrough().optional().describe("Optional metadata for the .meta.json sidecar"),
+      }).passthrough().optional().describe("Optional navigation metadata for the .meta.json sidecar. Index data only — role, appears_in, timestamps. Never put writing content (personality, voice, appearance) here; that belongs in the markdown. Good: { role: 'mentor', appears_in: ['part-01/chapter-01:b02'] }. Wrong: { personality: 'stoic, dry humor' } — that belongs in the markdown content."),
       extended_id: z.string().optional().describe(
         "If provided, writes an extended file instead of the brief. " +
         "E.g. 'voice-samples' creates canon/{type}/{id}/voice-samples.md. " +
