@@ -270,16 +270,17 @@ async function createMcpServer(): Promise<McpServer> {
     "Use get_context as the primary read tool — it returns any combination of project data in one call.",
     "All tools except list_projects and template (list/get/save actions) require a 'project' parameter.",
     "",
-    "Summary comments: Each chapter .md has a chapter-brief comment (<!-- chapter-brief [STATUS] ... -->) after the heading " +
-    "showing the chapter's status and truncated summary, plus beat-brief comments (<!-- beat-brief:ID [STATUS] ... -->) for each beat. " +
-    "These are auto-managed — refreshed on writes to beats or meta. " +
-    "For chapters missing these comments (created before this feature), call refresh_summaries once per chapter at session start.",
+    "Markdown-first architecture: The .md file is the source of truth for all narrative content. " +
+    "Beat markers include status: <!-- beat:ID [status] | label -->. " +
+    "Full summaries live as <!-- summary: ... --> comments after beat markers, and <!-- chapter-summary: ... --> in the preamble. " +
+    "The .meta.json sidecar is a navigation index only (characters, dirty_reason). " +
+    "Summaries, labels, and status are always read from and written to the markdown file.",
     "",
-    "Canon design philosophy: Markdown is the source of truth for everything that matters for writing. " +
-    "If this tool vanishes, every canon file is still readable prose — that's ejectability. " +
-    "The meta sidecar (.meta.json / meta.json) is an index layer only: appears_in, role, type, last_updated. " +
-    "Navigation data for the tool. Never put writing-relevant content (personality, voice, appearance, arc, constraints) only in meta. " +
-    "Rule of thumb: if a human writing a scene would need it, it goes in the markdown. If only the tool needs it to answer 'where does X appear?', it goes in meta.",
+    "Ejectability: Markdown is the source of truth for everything that matters for writing — prose, summaries, beat structure, canon. " +
+    "If this tool vanishes, every file is still readable prose. " +
+    "Meta sidecars (.meta.json) are navigation indexes only: characters, dirty_reason, appears_in, role, type. " +
+    "Never put writing-relevant content only in meta. " +
+    "Rule of thumb: if a human writing a scene would need it, it goes in the markdown. If only the tool needs it for queries, it goes in meta.",
     "",
     "Canon loading: Canon entries use ## sections for organization. " +
     "When sections exist, get_context returns only the top-matter (summary) plus a sections TOC. " +
@@ -1004,14 +1005,16 @@ async function createMcpServer(): Promise<McpServer> {
   });
 
   // =========================================================================
-  // refresh_summaries — maintenance/migration
+  // refresh_summaries — migration from legacy meta to markdown-first
   // =========================================================================
 
   server.registerTool("refresh_summaries", {
-    title: "Refresh Summary Comments",
+    title: "Migrate Chapter to Markdown-First",
     description:
-      "Regenerate all summary comments (chapter-brief + beat-briefs) in a chapter's prose file from the meta. " +
-      "Use for migration (existing chapters without comments) or after external edits.",
+      "Migrate a chapter from legacy full-fat .meta.json to markdown-first format. " +
+      "Moves summaries, labels, and status from JSON into the .md file as structured comments. " +
+      "Slims the .meta.json to navigation-only data (characters, dirty_reason). " +
+      "Safe to run multiple times — skips already-migrated chapters.",
     inputSchema: {
       project: projectParam,
       part_id: z.string().describe("Part identifier"),
@@ -1021,12 +1024,12 @@ async function createMcpServer(): Promise<McpServer> {
     logToolCall("refresh_summaries", { project, part_id, chapter_id });
     try {
       const root = store.projectRoot(project);
-      const mdPath = await store.refreshSummaryComments(project, part_id, chapter_id);
-      if (!mdPath) {
-        return textResult("All summary comments are already up to date.");
+      const paths = await store.migrateChapterToMarkdownFirst(project, part_id, chapter_id);
+      if (paths.length === 0) {
+        return textResult("Chapter is already in markdown-first format.");
       }
-      await commitFiles(root, [mdPath], `Refreshed beat summaries in ${part_id}/${chapter_id}`);
-      return textResult(`Refreshed beat summary comments in ${part_id}/${chapter_id}.md`);
+      await commitFiles(root, paths, `Migrated ${part_id}/${chapter_id} to markdown-first format`);
+      return textResult(`Migrated ${part_id}/${chapter_id} to markdown-first format. Updated: ${paths.join(", ")}`);
     } catch (err) {
       logToolError("refresh_summaries", err);
       throw err;
@@ -1173,7 +1176,7 @@ app.get("/help", async () => {
       select_variant: "Keep one variant of a beat, archive the rest to scratch.",
       reorder_beats: "Reorder beats within a chapter. Meta and prose updated together.",
       session_summary: "Create a session-level git commit summarizing the working session.",
-      refresh_summaries: "Regenerate chapter-brief and beat-brief comments from meta.",
+      refresh_summaries: "Migrate legacy meta to markdown-first format.",
     },
     architecture: {
       structure: "projects/{project}/ — project.json, parts/{part}/chapter-NN.md + .meta.json, canon/, scratch/",

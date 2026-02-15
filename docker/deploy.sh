@@ -37,6 +37,8 @@ fi
 
 docker buildx build \
   --platform linux/amd64 \
+  --provenance=false \
+  --sbom=false \
   --build-arg CACHEBUST="$(date +%s)" \
   --build-arg GIT_REF="${GIT_REF}" \
   "${TAGS[@]}" \

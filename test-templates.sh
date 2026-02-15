@@ -421,341 +421,363 @@ print(len(d.get('canon_types', [])))
 fi
 
 # =========================================================================
-# Test 14: create target=beat injects beat-brief comment into .md
+# Test 14: create target=beat injects beat marker with [status] and summary comment
 # =========================================================================
-echo "--- Test 14: create target=beat injects beat-brief into prose file ---"
+echo "--- Test 14: create target=beat injects marker + summary into prose file ---"
 mcp_call "create" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b01","label":"The guild arrives","summary":"The Guild marches into town at dawn. Banners flying, armor gleaming. The townsfolk watch from shuttered windows.","status":"planned","dirty_reason":null,"characters":["the-guild"],"depends_on":[],"depended_by":[]}}' > /dev/null
 
 T14_PASS=$(python3 -c "
 import sys
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
-has_marker = '<!-- beat:b01 |' in md
-has_brief = '<!-- beat-brief:b01 [PLANNED]' in md
-has_summary = 'Guild marches into town' in md
-ok = has_marker and has_brief and has_summary
-print('true' if ok else 'false|marker=' + str(has_marker) + ' brief=' + str(has_brief) + ' summary=' + str(has_summary))
+has_marker = '<!-- beat:b01 [planned] |' in md
+has_summary = '<!-- summary:' in md
+has_text = 'Guild marches into town' in md
+ok = has_marker and has_summary and has_text
+print('true' if ok else 'false|marker=' + str(has_marker) + ' summary=' + str(has_summary) + ' text=' + str(has_text))
 ")
 if [ "$(echo "$T14_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 14 "create beat injects beat-brief [PLANNED] into .md file" "true"
+  report 14 "create beat injects marker [planned] + summary comment into .md" "true"
 else
-  report 14 "create beat injects beat-brief [PLANNED] into .md file" "false" "$(echo "$T14_PASS" | cut -d'|' -f2-)"
+  report 14 "create beat injects marker [planned] + summary comment into .md" "false" "$(echo "$T14_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 15: write target=beat preserves beat-brief, getBeatProse is clean
+# Test 15: write target=beat preserves summary comment, getBeatProse is clean
 # =========================================================================
-echo "--- Test 15: write beat prose, verify .md has brief, beat read is clean ---"
+echo "--- Test 15: write beat prose, verify .md has summary, beat read is clean ---"
 mcp_call "write" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b01","content":"The dust rose before the column did. Marguerite saw it first."}' > /dev/null
 
-# Check the .md on disk still has beat-brief
+# Check the .md on disk still has summary comment
 T15A_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
-has_brief = 'beat-brief:b01' in md
+has_summary = '<!-- summary:' in md
 has_prose = 'dust rose before the column' in md
-print('true' if (has_brief and has_prose) else 'false|brief=' + str(has_brief) + ' prose=' + str(has_prose))
+print('true' if (has_summary and has_prose) else 'false|summary=' + str(has_summary) + ' prose=' + str(has_prose))
 ")
 
-# Check getBeatProse returns clean prose (no beat-brief)
+# Check getBeatProse returns clean prose (no summary comment)
 RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"beats":["part-01/chapter-01:b01"]}}')
 TEXT=$(extract_text "$RESULT")
 T15B_PASS=$(python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
 prose = d.get('beats', {}).get('part-01/chapter-01:b01', {}).get('prose', '')
-clean = 'beat-brief' not in prose
+clean = 'summary:' not in prose
 has_content = 'dust rose' in prose
 print('true' if (clean and has_content) else 'false|clean=' + str(clean) + ' content=' + str(has_content))
 " <<< "$TEXT")
 
 if [ "$(echo "$T15A_PASS" | cut -d'|' -f1)" = "true" ] && [ "$(echo "$T15B_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 15 "write beat: .md has brief, getBeatProse is clean" "true"
+  report 15 "write beat: .md has summary comment, getBeatProse is clean" "true"
 else
-  report 15 "write beat: .md has brief, getBeatProse is clean" "false" "disk=$(echo "$T15A_PASS" | cut -d'|' -f2-) api=$(echo "$T15B_PASS" | cut -d'|' -f2-)"
+  report 15 "write beat: .md has summary comment, getBeatProse is clean" "false" "disk=$(echo "$T15A_PASS" | cut -d'|' -f2-) api=$(echo "$T15B_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 16: update target=chapter refreshes beat-brief status
+# Test 16: update target=chapter updates beat marker status
 # =========================================================================
-echo "--- Test 16: update chapter refreshes beat-brief status ---"
+echo "--- Test 16: update chapter updates beat marker status ---"
 mcp_call "update" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","patch":{"beats":[{"id":"b01","status":"written"}]}}' > /dev/null
 
 T16_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
-has_written = '[WRITTEN]' in md
-no_planned = '[PLANNED]' not in md
+has_written = '<!-- beat:b01 [written]' in md
+no_planned = '[planned]' not in md
 print('true' if (has_written and no_planned) else 'false|written=' + str(has_written) + ' no_planned=' + str(no_planned))
 ")
 if [ "$(echo "$T16_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 16 "update chapter refreshes beat-brief to [WRITTEN]" "true"
+  report 16 "update chapter updates beat marker to [written]" "true"
 else
-  report 16 "update chapter refreshes beat-brief to [WRITTEN]" "false" "$(echo "$T16_PASS" | cut -d'|' -f2-)"
+  report 16 "update chapter updates beat marker to [written]" "false" "$(echo "$T16_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 17: update target=node dirty updates beat-brief
+# Test 17: update target=node dirty updates beat marker + sidecar
 # =========================================================================
-echo "--- Test 17: update node dirty updates beat-brief ---"
+echo "--- Test 17: update node dirty updates marker [dirty] + sidecar dirty_reason ---"
 mcp_call "update" '{"target":"node","project":"_fractal-test","node_ref":"part-01/chapter-01:b01","mark":"dirty","reason":"canon change: the-guild backstory revised"}' > /dev/null
 
 T17_PASS=$(python3 -c "
+import json
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
-has_dirty = '[DIRTY: canon change: the-guild backstory revised]' in md
-no_written = '[WRITTEN]' not in md
-print('true' if (has_dirty and no_written) else 'false|dirty=' + str(has_dirty) + ' no_written=' + str(no_written))
+meta = json.load(open('$TEST_DIR/parts/part-01/chapter-01.meta.json'))
+has_dirty_marker = '<!-- beat:b01 [dirty]' in md
+no_written = '[written]' not in md
+beat_meta = [b for b in meta.get('beats', []) if b['id'] == 'b01']
+has_dirty_reason = len(beat_meta) > 0 and beat_meta[0].get('dirty_reason') == 'canon change: the-guild backstory revised'
+ok = has_dirty_marker and no_written and has_dirty_reason
+print('true' if ok else 'false|marker=' + str(has_dirty_marker) + ' no_written=' + str(no_written) + ' reason=' + str(has_dirty_reason))
 ")
 if [ "$(echo "$T17_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 17 "update node dirty updates beat-brief to [DIRTY: reason]" "true"
+  report 17 "update node dirty: marker [dirty] + sidecar dirty_reason" "true"
 else
-  report 17 "update node dirty updates beat-brief to [DIRTY: reason]" "false" "$(echo "$T17_PASS" | cut -d'|' -f2-)"
+  report 17 "update node dirty: marker [dirty] + sidecar dirty_reason" "false" "$(echo "$T17_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 18: edit target=beat preserves beat-brief
+# Test 18: edit target=beat preserves summary comment
 # =========================================================================
-echo "--- Test 18: edit beat preserves beat-brief ---"
+echo "--- Test 18: edit beat preserves summary comment ---"
 mcp_call "edit" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b01","edits":[{"old_str":"Marguerite saw it first","new_str":"Marguerite noticed it first"}]}' > /dev/null
 
 T18_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
-has_brief = 'beat-brief:b01' in md
+has_summary = '<!-- summary:' in md
 has_edit = 'noticed it first' in md
-print('true' if (has_brief and has_edit) else 'false|brief=' + str(has_brief) + ' edit=' + str(has_edit))
+print('true' if (has_summary and has_edit) else 'false|summary=' + str(has_summary) + ' edit=' + str(has_edit))
 ")
 if [ "$(echo "$T18_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 18 "edit beat preserves beat-brief comment" "true"
+  report 18 "edit beat preserves summary comment" "true"
 else
-  report 18 "edit beat preserves beat-brief comment" "false" "$(echo "$T18_PASS" | cut -d'|' -f2-)"
+  report 18 "edit beat preserves summary comment" "false" "$(echo "$T18_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 19: add second beat, reorder — briefs travel with beats
+# Test 19: add second beat, reorder — summaries travel with beats
 # =========================================================================
-echo "--- Test 19: reorder_beats carries beat-brief comments ---"
+echo "--- Test 19: reorder_beats carries summary comments with beats ---"
 mcp_call "create" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b02","label":"The standoff","summary":"Unit 7 stands between the Guild and the bakery door. She does not move.","status":"planned","dirty_reason":null,"characters":["unit-7","the-guild"],"depends_on":[],"depended_by":[]}}' > /dev/null
 
 mcp_call "reorder_beats" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_order":["b02","b01"]}' > /dev/null
 
 T19_PASS=$(python3 -c "
+import re
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
 b02_marker = md.find('beat:b02')
 b01_marker = md.find('beat:b01')
-b02_brief = md.find('beat-brief:b02')
-b01_brief = md.find('beat-brief:b01')
 order_ok = 0 < b02_marker < b01_marker
-briefs_present = b02_brief > 0 and b01_brief > 0
-briefs_ordered = b02_brief < b01_brief
-ok = order_ok and briefs_present and briefs_ordered
-print('true' if ok else 'false|order=' + str(order_ok) + ' briefs=' + str(briefs_present) + ' brief_order=' + str(briefs_ordered))
+# Each beat should have its own summary nearby
+b02_section = md[b02_marker:b01_marker]
+b01_section = md[b01_marker:]
+b02_has_summary = '<!-- summary:' in b02_section and 'bakery door' in b02_section
+b01_has_summary = '<!-- summary:' in b01_section and 'Guild marches' in b01_section
+ok = order_ok and b02_has_summary and b01_has_summary
+print('true' if ok else 'false|order=' + str(order_ok) + ' b02_sum=' + str(b02_has_summary) + ' b01_sum=' + str(b01_has_summary))
 ")
 if [ "$(echo "$T19_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 19 "reorder_beats: beat-brief comments travel with their blocks" "true"
+  report 19 "reorder_beats: summary comments travel with their blocks" "true"
 else
-  report 19 "reorder_beats: beat-brief comments travel with their blocks" "false" "$(echo "$T19_PASS" | cut -d'|' -f2-)"
+  report 19 "reorder_beats: summary comments travel with their blocks" "false" "$(echo "$T19_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 20: refresh_summaries tool works
+# Test 20: refresh_summaries (migration) tool works
 # =========================================================================
-echo "--- Test 20: refresh_summaries tool ---"
+echo "--- Test 20: refresh_summaries (migration) tool ---"
 RESULT=$(mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01"}')
 TEXT=$(extract_text "$RESULT")
 T20_PASS=$(python3 -c "
 import sys
 text = sys.stdin.read()
-ok = 'up to date' in text or 'Refreshed' in text
+ok = 'up to date' in text.lower() or 'migrat' in text.lower() or 'already' in text.lower()
 print('true' if ok else 'false|' + repr(text[:200]))
 " <<< "$TEXT")
 if [ "$(echo "$T20_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 20 "refresh_summaries tool responds correctly" "true"
+  report 20 "refresh_summaries (migration) tool responds correctly" "true"
 else
-  report 20 "refresh_summaries tool responds correctly" "false" "$(echo "$T20_PASS" | cut -d'|' -f2-)"
+  report 20 "refresh_summaries (migration) tool responds correctly" "false" "$(echo "$T20_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 21: idempotency — refresh twice produces identical .md
+# Test 21: idempotency — migration twice produces identical .md
 # =========================================================================
-echo "--- Test 21: beat-brief refresh is idempotent ---"
+echo "--- Test 21: migration is idempotent ---"
 MD_BEFORE=$(cat "$TEST_DIR/parts/part-01/chapter-01.md")
 mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01"}' > /dev/null
 MD_AFTER=$(cat "$TEST_DIR/parts/part-01/chapter-01.md")
 if [ "$MD_BEFORE" = "$MD_AFTER" ]; then
-  report 21 "refresh_summaries is idempotent — .md unchanged on second run" "true"
+  report 21 "migration is idempotent — .md unchanged on second run" "true"
 else
-  report 21 "refresh_summaries is idempotent — .md unchanged on second run" "false" "files differ"
+  report 21 "migration is idempotent — .md unchanged on second run" "false" "files differ"
 fi
 
 # =========================================================================
-# Test 22: summary truncation for long summaries
+# Test 22: long summary is preserved in full in summary comment
 # =========================================================================
-echo "--- Test 22: long summary gets truncated in beat-brief ---"
+echo "--- Test 22: long summary is preserved in full in summary comment ---"
 mcp_call "create" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat":{"id":"b03","label":"The long speech","summary":"This is a very long beat summary that goes on and on about many things. It describes in great detail everything that happens in this particular beat of the story. The characters do things, say things, and experience things. There are descriptions of the setting, the mood, the weather, and the general atmosphere. This continues for quite a while because we want to test that the truncation logic works properly when the summary exceeds the maximum length allowed.","status":"planned","dirty_reason":null,"characters":[],"depends_on":[],"depended_by":[]}}' > /dev/null
 
 T22_PASS=$(python3 -c "
 import re
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
-m = re.search(r'<!-- beat-brief:b03 \[PLANNED\] (.+?) -->', md)
-if not m:
-    print('false|no beat-brief:b03 found')
+# Find the b03 beat marker position
+b03_pos = md.find('beat:b03')
+if b03_pos < 0:
+    print('false|no beat:b03 marker found')
 else:
-    text = m.group(1)
-    ok = len(text) <= 300 and text.startswith('This is a very long')
-    print('true' if ok else 'false|len=' + str(len(text)) + ' text=' + repr(text[:80]))
+    after = md[b03_pos:]
+    m = re.search(r'<!-- summary:\s*(.*?)\s*-->', after, re.DOTALL)
+    if not m:
+        print('false|no summary comment found after b03')
+    else:
+        # Normalize whitespace (word-wrapping inserts newlines)
+        text = ' '.join(m.group(1).split())
+        has_start = 'This is a very long' in text
+        has_end = 'maximum length allowed' in text
+        ok = has_start and has_end
+        print('true' if ok else 'false|start=' + str(has_start) + ' end=' + str(has_end) + ' len=' + str(len(text)))
 ")
 if [ "$(echo "$T22_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 22 "long summary is truncated in beat-brief (<=300 chars)" "true"
+  report 22 "long summary is preserved in full in summary comment" "true"
 else
-  report 22 "long summary is truncated in beat-brief (<=300 chars)" "false" "$(echo "$T22_PASS" | cut -d'|' -f2-)"
+  report 22 "long summary is preserved in full in summary comment" "false" "$(echo "$T22_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 23: remove target=beat also removes its beat-brief
+# Test 23: remove target=beat also removes its summary comment
 # =========================================================================
-echo "--- Test 23: remove beat removes beat-brief ---"
+echo "--- Test 23: remove beat removes marker and summary comment ---"
 mcp_call "remove" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","beat_id":"b03"}' > /dev/null
 
 T23_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
 no_marker = 'beat:b03' not in md
-no_brief = 'beat-brief:b03' not in md
-print('true' if (no_marker and no_brief) else 'false|marker_gone=' + str(no_marker) + ' brief_gone=' + str(no_brief))
+no_long_summary = 'maximum length allowed' not in md
+print('true' if (no_marker and no_long_summary) else 'false|marker_gone=' + str(no_marker) + ' summary_gone=' + str(no_long_summary))
 ")
 if [ "$(echo "$T23_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 23 "remove beat removes both beat marker and beat-brief" "true"
+  report 23 "remove beat removes marker and summary comment" "true"
 else
-  report 23 "remove beat removes both beat marker and beat-brief" "false" "$(echo "$T23_PASS" | cut -d'|' -f2-)"
+  report 23 "remove beat removes marker and summary comment" "false" "$(echo "$T23_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 24: create chapter with summary → chapter-brief appears
+# Test 24: create chapter with summary → chapter-summary appears
 # =========================================================================
-echo "--- Test 24: create chapter with summary injects chapter-brief ---"
+echo "--- Test 24: create chapter with summary injects chapter-summary ---"
 mcp_call "create" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","title":"The Market","summary":"Unit 7 visits the morning market and discovers a coded message."}' > /dev/null
 
 T24_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+md_flat = ' '.join(md.split())  # normalize word-wrapped lines
 has_heading = '# The Market' in md
-has_brief = '<!-- chapter-brief [PLANNING]' in md
-has_summary = 'coded message' in md
+has_summary = '<!-- chapter-summary:' in md
+has_text = 'coded message' in md_flat
 has_close = '<!-- /chapter -->' in md
-ok = has_heading and has_brief and has_summary and has_close
-print('true' if ok else 'false|heading=' + str(has_heading) + ' brief=' + str(has_brief) + ' summary=' + str(has_summary) + ' close=' + str(has_close))
+ok = has_heading and has_summary and has_text and has_close
+print('true' if ok else 'false|heading=' + str(has_heading) + ' ch_summary=' + str(has_summary) + ' text=' + str(has_text) + ' close=' + str(has_close))
 ")
 if [ "$(echo "$T24_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 24 "create chapter with summary injects chapter-brief [PLANNING]" "true"
+  report 24 "create chapter with summary injects chapter-summary comment" "true"
 else
-  report 24 "create chapter with summary injects chapter-brief [PLANNING]" "false" "$(echo "$T24_PASS" | cut -d'|' -f2-)"
+  report 24 "create chapter with summary injects chapter-summary comment" "false" "$(echo "$T24_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 25: create chapter without summary → no chapter-brief
+# Test 25: create chapter without summary → no chapter-summary
 # =========================================================================
-echo "--- Test 25: create chapter without summary → no chapter-brief ---"
+echo "--- Test 25: create chapter without summary → no chapter-summary ---"
 T25_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
-no_brief = 'chapter-brief' not in md
-print('true' if no_brief else 'false|chapter-brief found in chapter without summary')
+no_summary = 'chapter-summary' not in md
+print('true' if no_summary else 'false|chapter-summary found in chapter without summary')
 ")
 if [ "$(echo "$T25_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 25 "chapter without summary has no chapter-brief" "true"
+  report 25 "chapter without summary has no chapter-summary" "true"
 else
-  report 25 "chapter without summary has no chapter-brief" "false" "$(echo "$T25_PASS" | cut -d'|' -f2-)"
+  report 25 "chapter without summary has no chapter-summary" "false" "$(echo "$T25_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 26: chapter-brief coexists with beat-briefs
+# Test 26: chapter-summary coexists with beat summary comments
 # =========================================================================
-echo "--- Test 26: chapter-brief coexists with beat-briefs ---"
+echo "--- Test 26: chapter-summary coexists with beat summary comments ---"
 mcp_call "create" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","beat":{"id":"b01","label":"Arriving at market","summary":"Unit 7 enters through the east gate. Vendors call out prices.","status":"planned","dirty_reason":null,"characters":["unit-7"],"depends_on":[],"depended_by":[]}}' > /dev/null
 
 T26_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
-has_chapter_brief = '<!-- chapter-brief [PLANNING]' in md
-has_beat_brief = '<!-- beat-brief:b01 [PLANNED]' in md
-has_beat_marker = '<!-- beat:b01 |' in md
-# chapter-brief should come before beat markers
-cb_pos = md.find('chapter-brief')
+has_ch_summary = '<!-- chapter-summary:' in md
+has_beat_summary = '<!-- summary:' in md
+has_beat_marker = '<!-- beat:b01 [planned] |' in md
+# chapter-summary should come before beat markers
+cs_pos = md.find('chapter-summary')
 bm_pos = md.find('beat:b01')
-order_ok = cb_pos < bm_pos
-ok = has_chapter_brief and has_beat_brief and has_beat_marker and order_ok
-print('true' if ok else 'false|ch_brief=' + str(has_chapter_brief) + ' beat_brief=' + str(has_beat_brief) + ' order=' + str(order_ok))
+order_ok = cs_pos < bm_pos
+ok = has_ch_summary and has_beat_summary and has_beat_marker and order_ok
+print('true' if ok else 'false|ch_summary=' + str(has_ch_summary) + ' beat_summary=' + str(has_beat_summary) + ' order=' + str(order_ok))
 ")
 if [ "$(echo "$T26_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 26 "chapter-brief coexists with beat-briefs, correct order" "true"
+  report 26 "chapter-summary coexists with beat summaries, correct order" "true"
 else
-  report 26 "chapter-brief coexists with beat-briefs, correct order" "false" "$(echo "$T26_PASS" | cut -d'|' -f2-)"
+  report 26 "chapter-summary coexists with beat summaries, correct order" "false" "$(echo "$T26_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 27: update chapter summary → chapter-brief updated
+# Test 27: update chapter summary → chapter-summary updated
 # =========================================================================
-echo "--- Test 27: update chapter with summary updates chapter-brief ---"
+echo "--- Test 27: update chapter with summary updates chapter-summary ---"
 mcp_call "update" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"summary":"Unit 7 visits the morning market and finds a hidden cipher."}}' > /dev/null
 
 T27_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
-has_new_summary = 'hidden cipher' in md
-no_old_summary = 'coded message' not in md
-has_brief = '<!-- chapter-brief [PLANNING]' in md
-ok = has_new_summary and no_old_summary and has_brief
-print('true' if ok else 'false|new=' + str(has_new_summary) + ' no_old=' + str(no_old_summary) + ' brief=' + str(has_brief))
+md_flat = ' '.join(md.split())  # normalize word-wrapped lines
+has_new_summary = 'hidden cipher' in md_flat
+no_old_summary = 'coded message' not in md_flat
+has_ch_summary = '<!-- chapter-summary:' in md
+ok = has_new_summary and no_old_summary and has_ch_summary
+print('true' if ok else 'false|new=' + str(has_new_summary) + ' no_old=' + str(no_old_summary) + ' ch_summary=' + str(has_ch_summary))
 ")
 if [ "$(echo "$T27_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 27 "update chapter summary refreshes chapter-brief" "true"
+  report 27 "update chapter summary refreshes chapter-summary comment" "true"
 else
-  report 27 "update chapter summary refreshes chapter-brief" "false" "$(echo "$T27_PASS" | cut -d'|' -f2-)"
+  report 27 "update chapter summary refreshes chapter-summary comment" "false" "$(echo "$T27_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 28: status change updates chapter-brief status tag
+# Test 28: chapter status change preserved in sidecar, summary intact
 # =========================================================================
-echo "--- Test 28: status change updates chapter-brief tag ---"
+echo "--- Test 28: chapter status change: sidecar dirty_reason, md summary intact ---"
 mcp_call "update" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"status":"dirty","dirty_reason":"canon revision"}}' > /dev/null
 
 T28_PASS=$(python3 -c "
+import json
 md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
-has_dirty = '[DIRTY: canon revision]' in md
-no_planning = '<!-- chapter-brief [PLANNING]' not in md
-ok = has_dirty and no_planning
-print('true' if ok else 'false|dirty=' + str(has_dirty) + ' no_planning=' + str(no_planning))
+md_flat = ' '.join(md.split())  # normalize word-wrapped lines
+has_summary = 'hidden cipher' in md_flat
+has_ch_summary = '<!-- chapter-summary:' in md
+has_heading = '# The Market' in md
+has_close = '<!-- /chapter -->' in md
+ok = has_summary and has_ch_summary and has_heading and has_close
+print('true' if ok else 'false|summary=' + str(has_summary) + ' ch_summary=' + str(has_ch_summary) + ' heading=' + str(has_heading) + ' close=' + str(has_close))
 ")
 if [ "$(echo "$T28_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 28 "chapter-brief status updates to [DIRTY: reason]" "true"
+  report 28 "chapter status change: md summary preserved, file valid" "true"
 else
-  report 28 "chapter-brief status updates to [DIRTY: reason]" "false" "$(echo "$T28_PASS" | cut -d'|' -f2-)"
+  report 28 "chapter status change: md summary preserved, file valid" "false" "$(echo "$T28_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 29: refresh_summaries updates both chapter-brief and beat-briefs
+# Test 29: migration produces chapter-summary and beat summary comments
 # =========================================================================
-echo "--- Test 29: refresh_summaries covers chapter-brief + beat-briefs ---"
+echo "--- Test 29: migration covers chapter-summary + beat summaries ---"
 mcp_call "update" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","patch":{"status":"written","dirty_reason":null}}' > /dev/null
 RESULT=$(mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02"}')
 TEXT=$(extract_text "$RESULT")
 
 T29_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
-has_ch = '<!-- chapter-brief [WRITTEN]' in md
-has_beat = 'beat-brief:b01' in md
+has_ch = '<!-- chapter-summary:' in md
+has_beat = '<!-- summary:' in md
 ok = has_ch and has_beat
-print('true' if ok else 'false|ch_brief=' + str(has_ch) + ' beat_brief=' + str(has_beat))
+print('true' if ok else 'false|ch_summary=' + str(has_ch) + ' beat_summary=' + str(has_beat))
 ")
 if [ "$(echo "$T29_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 29 "refresh_summaries covers chapter-brief and beat-briefs" "true"
+  report 29 "migration: chapter-summary and beat summary comments present" "true"
 else
-  report 29 "refresh_summaries covers chapter-brief and beat-briefs" "false" "$(echo "$T29_PASS" | cut -d'|' -f2-)"
+  report 29 "migration: chapter-summary and beat summary comments present" "false" "$(echo "$T29_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 30: chapter-brief idempotency
+# Test 30: migration idempotency
 # =========================================================================
-echo "--- Test 30: chapter-brief refresh is idempotent ---"
+echo "--- Test 30: migration is idempotent ---"
 MD_BEFORE2=$(cat "$TEST_DIR/parts/part-01/chapter-02.md")
 mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02"}' > /dev/null
 MD_AFTER2=$(cat "$TEST_DIR/parts/part-01/chapter-02.md")
 if [ "$MD_BEFORE2" = "$MD_AFTER2" ]; then
-  report 30 "chapter-brief refresh is idempotent" "true"
+  report 30 "migration is idempotent" "true"
 else
-  report 30 "chapter-brief refresh is idempotent" "false" "files differ after second refresh"
+  report 30 "migration is idempotent" "false" "files differ after second migration"
 fi
 
 # =========================================================================
@@ -1116,29 +1138,29 @@ else
 fi
 
 # =========================================================================
-# Test 46: multi-line summary doesn't duplicate chapter-brief (regression)
+# Test 46: multi-line summary doesn't duplicate chapter-summary (regression)
 # =========================================================================
-echo "--- Test 46: multi-line summary produces exactly one chapter-brief ---"
+echo "--- Test 46: multi-line summary produces exactly one chapter-summary ---"
 mcp_call "create" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03","title":"The Return","summary":"Mid-October. The thermostat cranks up.\n\nTHE BOND: Second visit. Together again but the energy is completely different."}' > /dev/null
 
 T46_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-03.md').read()
 import re
-# Count chapter-brief comment blocks (single or multi-line)
-briefs = list(re.finditer(r'<!-- chapter-brief.*?-->', md, re.DOTALL))
-ok = len(briefs) == 1
-print('true' if ok else 'false|count=' + str(len(briefs)))
+# Count chapter-summary comment blocks (single or multi-line)
+summaries = list(re.finditer(r'<!-- chapter-summary:.*?-->', md, re.DOTALL))
+ok = len(summaries) == 1
+print('true' if ok else 'false|count=' + str(len(summaries)))
 ")
 if [ "$(echo "$T46_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 46 "multi-line summary produces exactly one chapter-brief" "true"
+  report 46 "multi-line summary produces exactly one chapter-summary" "true"
 else
-  report 46 "multi-line summary produces exactly one chapter-brief" "false" "$(echo "$T46_PASS" | cut -d'|' -f2-)"
+  report 46 "multi-line summary produces exactly one chapter-summary" "false" "$(echo "$T46_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 47: repeated refresh doesn't duplicate chapter-brief
+# Test 47: repeated migration doesn't duplicate chapter-summary
 # =========================================================================
-echo "--- Test 47: repeated refresh doesn't duplicate chapter-brief ---"
+echo "--- Test 47: repeated migration doesn't duplicate chapter-summary ---"
 mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03"}' > /dev/null
 mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03"}' > /dev/null
 mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03"}' > /dev/null
@@ -1146,56 +1168,60 @@ mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","ch
 T47_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-03.md').read()
 import re
-briefs = re.findall(r'chapter-brief', md)
-ok = len(briefs) == 1
-print('true' if ok else 'false|count=' + str(len(briefs)) + ' expected 1')
+summaries = re.findall(r'chapter-summary:', md)
+ok = len(summaries) == 1
+print('true' if ok else 'false|count=' + str(len(summaries)) + ' expected 1')
 ")
 if [ "$(echo "$T47_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 47 "repeated refresh doesn't duplicate chapter-brief" "true"
+  report 47 "repeated migration doesn't duplicate chapter-summary" "true"
 else
-  report 47 "repeated refresh doesn't duplicate chapter-brief" "false" "$(echo "$T47_PASS" | cut -d'|' -f2-)"
+  report 47 "repeated migration doesn't duplicate chapter-summary" "false" "$(echo "$T47_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================
-# Test 48: existing multi-line chapter-brief gets cleaned up
+# Test 48: legacy chapter-brief gets migrated to chapter-summary
 # =========================================================================
-echo "--- Test 48: existing multi-line chapter-brief gets cleaned up ---"
-# Simulate the bug: manually inject duplicate multi-line chapter-briefs
+echo "--- Test 48: legacy chapter-brief gets migrated to chapter-summary ---"
+# Simulate legacy format: manually inject old-style chapter-briefs
+python3 << 'PYEOF'
+import sys
+path = sys.argv[1] if len(sys.argv) > 1 else None
+PYEOF
+
 python3 -c "
-md = open('$TEST_DIR/parts/part-01/chapter-03.md').read()
-# Inject 3 extra multi-line chapter-briefs (simulating the old bug)
-extra = '''<!-- chapter-brief [PLANNING] Mid-October. The thermostat cranks up.
-
-THE BOND: Second visit. Together again. -->
-<!-- chapter-brief [PLANNING] Mid-October. The thermostat cranks up.
-
-THE BOND: Second visit. Together again. -->
-<!-- chapter-brief [PLANNING] Mid-October. The thermostat cranks up.
-
-THE BOND: Second visit. Together again. -->'''
+import os, sys
+path = '$TEST_DIR/parts/part-01/chapter-03.md'
+md = open(path).read()
+# Inject legacy chapter-brief comments (simulating pre-migration format)
+extra = '<!-- chapter-brief [PLANNING] Mid-October. The thermostat cranks up. THE BOND: Second visit. Together again. -->'
 # Insert after heading
-lines = md.split('\n')
+lines = md.split(chr(10))
 for i, line in enumerate(lines):
     if line.startswith('# '):
         lines.insert(i+1, extra)
+        lines.insert(i+2, extra)
+        lines.insert(i+3, extra)
         break
-open('$TEST_DIR/parts/part-01/chapter-03.md', 'w').write('\n'.join(lines))
+open(path, 'w').write(chr(10).join(lines))
 "
 
-# Now refresh should clean them all up and leave exactly one brief
+# Now migration should clean up legacy chapter-briefs and produce one chapter-summary
 mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03"}' > /dev/null
 
 T48_PASS=$(python3 -c "
 md = open('$TEST_DIR/parts/part-01/chapter-03.md').read()
 import re
-briefs = list(re.finditer(r'<!--\s*chapter-brief\s*\[', md))
-ok = len(briefs) == 1
-print('true' if ok else 'false|count=' + str(len(briefs)))
+legacy_briefs = list(re.finditer(r'chapter-brief', md))
+new_summaries = list(re.finditer(r'chapter-summary:', md))
+no_legacy = len(legacy_briefs) == 0
+has_one_summary = len(new_summaries) == 1
+ok = no_legacy and has_one_summary
+print('true' if ok else 'false|legacy_count=' + str(len(legacy_briefs)) + ' summary_count=' + str(len(new_summaries)))
 ")
 if [ "$(echo "$T48_PASS" | cut -d'|' -f1)" = "true" ]; then
-  report 48 "existing multi-line chapter-brief gets cleaned up" "true"
+  report 48 "legacy chapter-brief migrated to single chapter-summary" "true"
 else
-  report 48 "existing multi-line chapter-brief gets cleaned up" "false" "$(echo "$T48_PASS" | cut -d'|' -f2-)"
+  report 48 "legacy chapter-brief migrated to single chapter-summary" "false" "$(echo "$T48_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================

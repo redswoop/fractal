@@ -29,7 +29,7 @@ rust-and-flour/
 │   ├── part-01/
 │   │   ├── part.json               ← part title, summary, arc description, status
 │   │   ├── chapter-01.md           ← the prose (with beat markers)
-│   │   ├── chapter-01.meta.json    ← beat index, summaries, dirty states, deps
+│   │   ├── chapter-01.meta.json    ← slim navigation index (characters, dirty_reason, pov, location)
 │   │   ├── chapter-02.md
 │   │   ├── chapter-02.meta.json
 │   │   └── ...
@@ -71,14 +71,20 @@ A fractal tree with state, dependencies, and zoom-level summaries it can render 
 
 ---
 
-## The Prose File: Beat Markers
+## The Prose File: Beat Markers & Summary Comments
 
-A chapter file looks like this:
+The markdown file is the **source of truth for all narrative content**: prose, beat summaries, labels, status, and chapter summaries. A chapter file looks like this:
 
 ```markdown
 # Chapter 1: Ignition
+<!-- chapter-summary: Unit 7 walks down Main Street for the tenth
+time. Today she goes into the bakery. Marguerite offers to teach
+her. -->
 
-<!-- beat:b01 | Unit 7 walks down Main Street -->
+<!-- beat:b01 [written] | Unit 7 walks down Main Street -->
+<!-- summary: Unit 7 walks past the bakery for the tenth time.
+People stare. She doesn't understand why — she has verified that
+walking is legal. -->
 Unit 7 walked down Main Street at 6:47 AM because that was when
 the bakery opened and she had calculated the optimal arrival time
 based on visible foot traffic patterns over the previous nine days
@@ -86,34 +92,49 @@ of observation.
 
 People stared. This was not new.
 
-<!-- beat:b02 | Unit 7 enters the bakery -->
+<!-- beat:b02 [written] | Unit 7 enters the bakery -->
+<!-- summary: Marguerite recognizes her. She's been watching Unit 7
+walk past. She doesn't flinch — the first person in town who
+doesn't. -->
 The woman behind the counter looked up immediately. She did not
 step back. She did not pull a child closer or speed up a pickup
 truck.
 
 "You're the one who's been walking past," she said.
 
-<!-- beat:b03 | Marguerite offers to teach her -->
-Marguerite set a roll on the counter. It was warm. Unit 7's
-thermal sensors registered 41.2 degrees Celsius.
-
-"Eat it," Marguerite said.
-
-"I do not eat."
-
-"Then hold it. Tell me what you feel."
+<!-- beat:b03 [planned] | Marguerite offers to teach her -->
+<!-- summary: Marguerite hands Unit 7 a roll and tells her to hold
+it. Unit 7's sensors register warmth. Something she can't
+categorize happens. -->
 
 <!-- /chapter -->
 ```
 
-### Marker format
+### Beat marker format
 
 ```
-<!-- beat:BEAT_ID | SHORT_DESCRIPTION -->
-...prose...
+<!-- beat:BEAT_ID [STATUS] | LABEL -->
 ```
 
-That's it. The beat ID is a local identifier (unique within the chapter). The short description is a human-readable label — it's *not* the summary (that lives in the meta file), it's just a signpost so you can scan the file and know where you are.
+The beat ID is a local identifier (unique within the chapter). Status is one of `planned`, `written`, `dirty`, or `conflict`. The label is a human-readable signpost so you can scan the file and know where you are.
+
+### Summary comment format
+
+```
+<!-- summary: FULL BEAT SUMMARY TEXT -->
+```
+
+Placed immediately after the beat marker, before prose. Word-wrapped at ~80 columns for readability. Contains the complete beat summary — no truncation. The parser strips these from prose when returning beat content via `get_context`.
+
+### Chapter summary format
+
+```
+<!-- chapter-summary: FULL CHAPTER SUMMARY TEXT -->
+```
+
+Placed in the preamble after the `# Heading`. Word-wrapped at ~80 columns.
+
+### Closing marker
 
 The closing `<!-- /chapter -->` is optional but useful for parsing.
 
@@ -183,7 +204,7 @@ Annotation IDs are line-number-based: `part-01/chapter-03:b02:n47`. Since line n
 
 ## The Meta Files
 
-Every content file has an optional `.meta.json` sidecar. The prose file is the source of truth for *content*. The meta file is the source of truth for *structure and state*.
+The prose file is the source of truth for all narrative content (prose, summaries, labels, status). The `.meta.json` sidecar is a **slim navigation index** — it holds only data that doesn't belong in prose: characters, dirty reasons, POV, location, timeline position.
 
 ### `project.json` (root)
 
@@ -210,52 +231,41 @@ Every content file has an optional `.meta.json` sidecar. The prose file is the s
 }
 ```
 
-### `chapter-NN.meta.json`
+### `chapter-NN.meta.json` (slim navigation index)
+
+The sidecar holds only data that doesn't belong in prose. Summary, label, and status live in the markdown file via beat markers and summary comments.
 
 ```json
 {
   "title": "Ignition",
-  "summary": "Unit 7 walks down Main Street for the tenth time. Today she goes into the bakery. Marguerite offers to teach her.",
   "pov": "unit-7",
   "location": "the-bakery",
   "timeline_position": "2045-03-14",
-  "status": "clean",
   "beats": [
     {
       "id": "b01",
-      "label": "Unit 7 walks down Main Street",
-      "summary": "Unit 7 walks past the bakery for the tenth time. People stare. She doesn't understand why — she has verified that walking is legal.",
-      "status": "written",
-      "dirty_reason": null,
       "characters": ["unit-7"],
-      "depends_on": [],
-      "depended_by": ["chapter-01:b02"]
+      "dirty_reason": null
     },
     {
       "id": "b02",
-      "label": "Unit 7 enters the bakery",
-      "summary": "Marguerite recognizes her. She's been watching Unit 7 walk past. She doesn't flinch — the first person in town who doesn't.",
-      "status": "written",
-      "dirty_reason": null,
       "characters": ["unit-7", "marguerite"],
-      "depends_on": ["chapter-01:b01"],
-      "depended_by": ["chapter-01:b03", "chapter-02:b01"]
+      "dirty_reason": null
     },
     {
       "id": "b03",
-      "label": "Marguerite offers to teach her",
-      "summary": "Marguerite hands Unit 7 a roll and tells her to hold it. Unit 7's sensors register warmth. Something she can't categorize happens.",
-      "status": "planned",
-      "dirty_reason": "prose not yet written",
       "characters": ["unit-7", "marguerite"],
-      "depends_on": ["chapter-01:b02"],
-      "depended_by": ["chapter-02:b01"]
+      "dirty_reason": "prose not yet written"
     }
   ]
 }
 ```
 
+When reading chapter metadata via `get_context`, the tool merges the markdown (summaries, labels, status) with the sidecar (characters, dirty_reason) to present a complete view.
+
 ### Beat status values
+
+Status is stored in the beat marker in the markdown file: `<!-- beat:b03 [planned] | label -->`.
 
 | Status | Meaning |
 |--------|---------|
@@ -266,7 +276,7 @@ Every content file has an optional `.meta.json` sidecar. The prose file is the s
 
 ### `dirty_reason`
 
-When I mark something dirty, I say *why*:
+When I mark something dirty, I say *why* (stored in the sidecar):
 
 - `"marguerite.md canon updated: going blind, not dying"`
 - `"chapter-02:b02 rewrote Unit 7's motivation, may affect this scene"`
@@ -536,13 +546,13 @@ Returns any combination of project data in one call via the `include` object:
 - `select_variant(project, part_id, chapter_id, beat_id, keep_index)` → keep one variant, archive rest to scratch
 
 ### `reorder_beats` — Reorder beats in a chapter
-- `reorder_beats(project, part_id, chapter_id, beat_order)` → reorder beats; prose and briefs travel with their beats
+- `reorder_beats(project, part_id, chapter_id, beat_order)` → reorder beats; prose and summary comments travel with their beats
 
 ### `session_summary` — Session-level git commit
 - `session_summary(project, message)` → create a session-level git commit summarizing work done
 
-### `refresh_summaries` — Regenerate brief comments
-- `refresh_summaries(project, part_id, chapter_id)` → regenerate chapter-brief and beat-brief comments from meta
+### `refresh_summaries` — Migrate to markdown-first format
+- `refresh_summaries(project, part_id, chapter_id)` → migrate legacy chapter from full-fat sidecar to markdown-first format (injects summaries/labels/status into .md, slims sidecar to navigation index). Idempotent — no-op if already migrated.
 
 ### Every write operation triggers a git commit.
 
@@ -550,14 +560,14 @@ Returns any combination of project data in one call via the `include` object:
 
 ## Zoom Level Rendering (What the App Shows)
 
-The app doesn't call Claude to render these. It reads the meta files directly.
+The app reads markdown and meta files to render these views.
 
 | Zoom Level | What's Visible | Data Source |
 |------------|---------------|-------------|
 | 0 — Project | Title, logline, parts as blocks with summaries | `project.json` + each `part.json` |
-| 1 — Part | Part title/arc, chapters as cards with summaries | `part.json` + each `chapter.meta.json` (title + summary only) |
-| 2 — Chapter | Chapter summary, beats as rows with labels + status indicators | `chapter.meta.json` |
-| 3 — Beat | Beat summary + context, prose visible | `chapter.meta.json` (beat entry) + parsed prose from `.md` |
+| 1 — Part | Part title/arc, chapters as cards with summaries | `part.json` + chapter `.md` (chapter-summary comment) + `.meta.json` (title) |
+| 2 — Chapter | Chapter summary, beats as rows with labels + status indicators | chapter `.md` (beat markers with [status], summary comments) |
+| 3 — Beat | Beat summary + context, prose visible | chapter `.md` (summary comment + prose) merged with `.meta.json` (characters, dirty_reason) |
 | 4 — Prose | Full writing view, beat markers visible as subtle dividers | `chapter.md` raw |
 
 Status colors propagate upward. If a beat is dirty, the chapter shows a yellow indicator. If multiple chapters have dirty beats, the part shows yellow. You see project health at every zoom level.

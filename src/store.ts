@@ -113,8 +113,11 @@ type AnnotationType = (typeof ANNOTATION_TYPES)[number];
 const ANNOTATION_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*?))?\s*-->$/;
 // Detects annotation opening that may not close on the same line
 const ANNOTATION_START_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*))?$/;
-const BEAT_MARKER_REGEX = /^<!--\s*beat:(\S+)\s*\|\s*(.+?)\s*-->/;
-const BEAT_BRIEF_GLOBAL = /<!--\s*beat-brief:\S+\s*\[[^\]]+\][\s\S]*?-->\n?/g;
+const BEAT_MARKER_REGEX = /^<!--\s*beat:(\S+)\s*(?:\[([^\]]+)\]\s*)?\|\s*(.+?)\s*-->/;
+const SUMMARY_COMMENT_REGEX = /^<!--\s*summary:\s*(.*?)\s*-->$/;
+const SUMMARY_START_REGEX = /^<!--\s*summary:\s*(.*)$/;
+const CHAPTER_SUMMARY_REGEX = /^<!--\s*chapter-summary:\s*(.*?)\s*-->$/;
+const CHAPTER_SUMMARY_START_REGEX = /^<!--\s*chapter-summary:\s*(.*)$/;
 
 export interface ParsedAnnotation {
   id: string;
@@ -146,101 +149,214 @@ export interface GetAnnotationsResult {
 }
 
 // ---------------------------------------------------------------------------
-// Beat summary comment helpers
+// Summary comment helpers — word-wrap for markdown readability
 // ---------------------------------------------------------------------------
 
-function truncateSummary(summary: string, maxLen: number = 280): string {
-  if (summary.length <= maxLen) return summary;
-  const truncated = summary.slice(0, maxLen);
-  const lastSentence = Math.max(
-    truncated.lastIndexOf(". "),
-    truncated.lastIndexOf("! "),
-    truncated.lastIndexOf("? ")
-  );
-  if (lastSentence > maxLen * 0.5) {
-    return truncated.slice(0, lastSentence + 1);
+/**
+ * Build a word-wrapped summary comment: <!-- summary: text -->
+ * Wraps at ~80 columns for human readability.
+ */
+function buildSummaryBlock(summary: string): string {
+  if (!summary) return "";
+  const safeMessage = summary.replace(/\s+/g, " ").trim();
+  const singleLine = `<!-- summary: ${safeMessage} -->`;
+  if (singleLine.length <= 80) return singleLine;
+
+  const prefix = "<!-- summary: ";
+  const suffix = " -->";
+  const words = safeMessage.split(" ");
+  const lines: string[] = [];
+  let current = prefix;
+
+  for (const word of words) {
+    const candidate = current + (current === prefix ? "" : " ") + word;
+    if (candidate.length > 80 && current !== prefix) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
   }
-  const lastSpace = truncated.lastIndexOf(" ");
-  if (lastSpace > maxLen * 0.6) {
-    return truncated.slice(0, lastSpace) + "…";
-  }
-  return truncated + "…";
-}
-
-function buildSummaryComment(beat: BeatMeta): string | null {
-  if (!beat.summary) return null;
-  const statusTag = beat.status === "dirty" && beat.dirty_reason
-    ? `DIRTY: ${beat.dirty_reason}`
-    : beat.status.toUpperCase();
-  const text = truncateSummary(beat.summary);
-  return `<!-- beat-brief:${beat.id} [${statusTag}] ${text} -->`;
-}
-
-// ---------------------------------------------------------------------------
-// Chapter-level summary comment helpers
-// ---------------------------------------------------------------------------
-
-const CHAPTER_BRIEF_GLOBAL = /<!--\s*chapter-brief\s*\[[^\]]+\][\s\S]*?-->\n?/g;
-
-function buildChapterBriefComment(meta: ChapterMeta): string | null {
-  if (!meta.summary) return null;
-  const statusTag = meta.status === "dirty" && meta.dirty_reason
-    ? `DIRTY: ${meta.dirty_reason}`
-    : meta.status.toUpperCase();
-  const text = truncateSummary(meta.summary);
-  return `<!-- chapter-brief [${statusTag}] ${text} -->`;
+  lines.push(current + suffix);
+  return lines.join("\n");
 }
 
 /**
- * Strip a chapter-brief comment from the preamble (text before any beat marker).
- * Only scans preamble lines — never looks past them.
+ * Build a word-wrapped chapter-summary comment.
  */
-function stripChapterBrief(preamble: string): { brief: string | null; preamble: string } {
-  // Handle both single-line and multi-line chapter-brief comments,
-  // including duplicates caused by the previous single-line-only matching bug.
-  const regex = /<!--\s*chapter-brief\s*\[[^\]]+\][\s\S]*?-->/g;
-  let brief: string | null = null;
-  const cleaned = preamble.replace(regex, (match) => {
-    if (!brief) brief = match;
-    return "";
-  });
-  if (!brief) return { brief: null, preamble };
-  return { brief, preamble: cleaned.replace(/\n{3,}/g, "\n\n") };
+function buildChapterSummaryBlock(summary: string): string {
+  if (!summary) return "";
+  const safeMessage = summary.replace(/\s+/g, " ").trim();
+  const singleLine = `<!-- chapter-summary: ${safeMessage} -->`;
+  if (singleLine.length <= 80) return singleLine;
+
+  const prefix = "<!-- chapter-summary: ";
+  const suffix = " -->";
+  const words = safeMessage.split(" ");
+  const lines: string[] = [];
+  let current = prefix;
+
+  for (const word of words) {
+    const candidate = current + (current === prefix ? "" : " ") + word;
+    if (candidate.length > 80 && current !== prefix) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  lines.push(current + suffix);
+  return lines.join("\n");
 }
 
 /**
- * Inject a chapter-brief comment into the preamble, immediately after the
- * first `# ` heading line. If brief is null/empty, return preamble unchanged.
+ * Build a beat marker line with embedded status.
  */
-function injectChapterBrief(preamble: string, brief: string | null): string {
-  if (!brief) return preamble;
+function buildBeatMarker(id: string, status: string, label: string): string {
+  return `<!-- beat:${id} [${status}] | ${label} -->`;
+}
+
+// ---------------------------------------------------------------------------
+// Chapter-summary and summary comment parsing from markdown
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a multi-line comment block starting at line i.
+ * Returns the joined text content and the end line index, or null if not found.
+ */
+function parseMultiLineComment(lines: string[], startLine: number, firstLineContent: string): { text: string; endLine: number } | null {
+  let joined = firstLineContent;
+  for (let j = startLine + 1; j < lines.length; j++) {
+    const scanLine = lines[j]!.trim();
+    // Abort at structural boundaries
+    if (BEAT_MARKER_REGEX.test(scanLine)) return null;
+    if (scanLine === "<!-- /chapter -->") return null;
+    if (scanLine.includes("-->")) {
+      // Strip the closing -->
+      joined += " " + scanLine.replace(/\s*-->\s*$/, "");
+      return { text: joined.replace(/\s+/g, " ").trim(), endLine: j };
+    }
+    joined += " " + scanLine;
+  }
+  return null; // Never found closing -->
+}
+
+/**
+ * Extract chapter-summary from preamble lines (before any beat marker).
+ * Returns the summary text and the preamble with the comment stripped.
+ */
+function extractChapterSummary(preamble: string): { summary: string | null; preamble: string } {
+  const lines = preamble.split("\n");
+  let summary: string | null = null;
+  const toRemove = new Set<number>();
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    // Single-line chapter-summary
+    const singleMatch = CHAPTER_SUMMARY_REGEX.exec(line);
+    if (singleMatch) {
+      summary = singleMatch[1]!.trim();
+      toRemove.add(i);
+      continue;
+    }
+    // Multi-line chapter-summary
+    const startMatch = CHAPTER_SUMMARY_START_REGEX.exec(line);
+    if (startMatch) {
+      const result = parseMultiLineComment(lines, i, startMatch[1] ?? "");
+      if (result) {
+        summary = result.text;
+        for (let k = i; k <= result.endLine; k++) toRemove.add(k);
+        i = result.endLine;
+      }
+    }
+    // Also strip legacy chapter-brief comments during migration
+    if (/^<!--\s*chapter-brief\s*\[/.test(line)) {
+      // Find end of this comment (may be multi-line)
+      if (line.includes("-->")) {
+        toRemove.add(i);
+      } else {
+        toRemove.add(i);
+        for (let j = i + 1; j < lines.length; j++) {
+          toRemove.add(j);
+          if (lines[j]!.includes("-->")) { i = j; break; }
+        }
+      }
+    }
+  }
+
+  if (summary === null && toRemove.size === 0) return { summary: null, preamble };
+  const cleaned = lines.filter((_, i) => !toRemove.has(i)).join("\n").replace(/\n{3,}/g, "\n\n");
+  return { summary, preamble: cleaned };
+}
+
+/**
+ * Extract a <!-- summary: ... --> comment from raw beat prose.
+ * Returns the summary text and the prose with the comment stripped.
+ */
+function extractBeatSummary(raw: string): { summary: string | null; prose: string } {
+  const lines = raw.split("\n");
+  let summary: string | null = null;
+  const toRemove = new Set<number>();
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+
+    // Single-line summary
+    const singleMatch = SUMMARY_COMMENT_REGEX.exec(line);
+    if (singleMatch) {
+      summary = singleMatch[1]!.trim();
+      toRemove.add(i);
+      break; // Only one summary per beat
+    }
+
+    // Multi-line summary
+    const startMatch = SUMMARY_START_REGEX.exec(line);
+    if (startMatch) {
+      const result = parseMultiLineComment(lines, i, startMatch[1] ?? "");
+      if (result) {
+        summary = result.text;
+        for (let k = i; k <= result.endLine; k++) toRemove.add(k);
+      }
+      break;
+    }
+
+    // Also strip legacy beat-brief comments
+    if (/^<!--\s*beat-brief:\S+\s*\[/.test(line)) {
+      if (line.includes("-->")) {
+        toRemove.add(i);
+      } else {
+        toRemove.add(i);
+        for (let j = i + 1; j < lines.length; j++) {
+          toRemove.add(j);
+          if (lines[j]!.includes("-->")) { i = j; break; }
+        }
+      }
+      continue; // Keep looking for a real summary after legacy brief
+    }
+
+    // Stop at first non-empty, non-comment line (we're past the metadata zone)
+    if (line && !line.startsWith("<!--")) break;
+  }
+
+  if (summary === null && toRemove.size === 0) return { summary: null, prose: raw };
+  const cleaned = lines.filter((_, i) => !toRemove.has(i)).join("\n").trim();
+  return { summary, prose: cleaned };
+}
+
+/**
+ * Inject a chapter-summary comment into the preamble, after the heading.
+ */
+function injectChapterSummary(preamble: string, summary: string | null): string {
+  if (!summary) return preamble;
+  const comment = buildChapterSummaryBlock(summary);
   const lines = preamble.split("\n");
   for (let i = 0; i < lines.length; i++) {
     if (lines[i]!.startsWith("# ")) {
-      lines.splice(i + 1, 0, brief);
+      lines.splice(i + 1, 0, comment);
       return lines.join("\n");
     }
   }
-  // No heading found — prepend
-  return brief + "\n" + preamble;
-}
-
-/**
- * Strip a beat-brief summary comment from raw prose text.
- * Scans the first few lines (stopping at the first real prose line)
- * looking for a beat-brief comment. Returns the comment and clean prose.
- */
-function stripSummaryComment(raw: string): { comment: string | null; prose: string } {
-  // Handle both single-line and multi-line beat-brief comments,
-  // including duplicates from the previous single-line-only matching bug.
-  const regex = /<!--\s*beat-brief:\S+\s*\[[^\]]+\][\s\S]*?-->\n?/g;
-  let comment: string | null = null;
-  const cleaned = raw.replace(regex, (match) => {
-    if (!comment) comment = match.replace(/\n$/, "");
-    return "";
-  });
-  if (!comment) return { comment: null, prose: raw };
-  return { comment, prose: cleaned.trim() };
+  return comment + "\n" + preamble;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,19 +366,21 @@ function stripSummaryComment(raw: string): { comment: string | null; prose: stri
 interface ParsedBeat {
   id: string;
   label: string;
+  status: string | null;
   prose: string;
 }
 
 function parseBeats(markdown: string): ParsedBeat[] {
-  const beatRegex = /<!--\s*beat:(\S+)\s*\|\s*(.+?)\s*-->/g;
+  const beatRegex = /<!--\s*beat:(\S+)\s*(?:\[([^\]]+)\]\s*)?\|\s*(.+?)\s*-->/g;
   const beats: ParsedBeat[] = [];
   let match: RegExpExecArray | null;
-  const matches: { id: string; label: string; index: number; end: number }[] = [];
+  const matches: { id: string; status: string | null; label: string; index: number; end: number }[] = [];
 
   while ((match = beatRegex.exec(markdown)) !== null) {
     matches.push({
       id: match[1]!,
-      label: match[2]!,
+      status: match[2] ?? null,
+      label: match[3]!,
       index: match.index,
       end: match.index + match[0].length,
     });
@@ -277,8 +395,8 @@ function parseBeats(markdown: string): ParsedBeat[] {
       proseEnd = chapterEnd;
     }
     const rawProse = markdown.slice(current.end, proseEnd).trim();
-    const { prose } = stripSummaryComment(rawProse);
-    beats.push({ id: current.id, label: current.label, prose });
+    const { prose } = extractBeatSummary(rawProse);
+    beats.push({ id: current.id, status: current.status, label: current.label, prose });
   }
 
   return beats;
@@ -295,36 +413,40 @@ function replaceOrInsertBeatProse(
     throw new Error(`Beat marker for ${beatId} not found in chapter file`);
   }
   parsed.blocks[idx] = { ...parsed.blocks[idx]!, prose: newProse };
-  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterBrief);
+  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterSummary);
 }
 
-function addBeatMarker(
+function addBeatMarkerToMarkdown(
   markdown: string,
   beatId: string,
+  status: string,
   label: string,
+  summary: string,
   afterBeatId?: string
 ): string {
-  const marker = `<!-- beat:${beatId} | ${label} -->`;
+  const marker = buildBeatMarker(beatId, status, label);
+  const summaryBlock = buildSummaryBlock(summary);
+  const insertion = summaryBlock ? `${marker}\n${summaryBlock}\n\n` : `${marker}\n\n`;
   if (afterBeatId) {
     const afterRegex = new RegExp(
-      `(<!--\\s*beat:${afterBeatId}\\s*\\|[^>]*-->[\\s\\S]*?)(?=<!--\\s*(?:beat:\\S|/chapter))`
+      `(<!--\\s*beat:${afterBeatId}\\s*(?:\\[[^\\]]+\\]\\s*)?\\|[^>]*-->[\\s\\S]*?)(?=<!--\\s*(?:beat:\\S|/chapter))`
     );
     const match = afterRegex.exec(markdown);
     if (match) {
       const insertPoint = match.index + match[0].length;
-      return markdown.slice(0, insertPoint) + `${marker}\n\n` + markdown.slice(insertPoint);
+      return markdown.slice(0, insertPoint) + insertion + markdown.slice(insertPoint);
     }
   }
   const chapterEnd = markdown.indexOf("<!-- /chapter -->");
   if (chapterEnd !== -1) {
-    return markdown.slice(0, chapterEnd) + `${marker}\n\n` + markdown.slice(chapterEnd);
+    return markdown.slice(0, chapterEnd) + insertion + markdown.slice(chapterEnd);
   }
-  return markdown + `\n${marker}\n\n<!-- /chapter -->\n`;
+  return markdown + `\n${insertion}<!-- /chapter -->\n`;
 }
 
 function removeBeatMarker(markdown: string, beatId: string): { updated: string; removedProse: string } {
   const beatRegex = new RegExp(
-    `<!--\\s*beat:${beatId}\\s*\\|[^>]*-->([\\s\\S]*?)(?=<!--\\s*(?:beat:\\S|/chapter)|$)`
+    `<!--\\s*beat:${beatId}\\s*(?:\\[[^\\]]+\\]\\s*)?\\|[^>]*-->([\\s\\S]*?)(?=<!--\\s*(?:beat:\\S|/chapter)|$)`
   );
   const match = beatRegex.exec(markdown);
   const removedProse = match ? match[1]!.trim() : "";
@@ -339,36 +461,38 @@ function removeBeatMarker(markdown: string, beatId: string): { updated: string; 
 interface BeatBlock {
   id: string;
   label: string;
-  summaryComment: string | null;
+  status: string | null;
+  summary: string | null;
   prose: string;
 }
 
 function parseBeatsGrouped(markdown: string): {
   preamble: string;
-  chapterBrief: string | null;
+  chapterSummary: string | null;
   blocks: BeatBlock[];
   postamble: string;
 } {
-  const beatRegex = /<!--\s*beat:(\S+)\s*\|\s*(.+?)\s*-->/g;
-  const matches: { id: string; label: string; index: number; end: number }[] = [];
+  const beatRegex = /<!--\s*beat:(\S+)\s*(?:\[([^\]]+)\]\s*)?\|\s*(.+?)\s*-->/g;
+  const matches: { id: string; status: string | null; label: string; index: number; end: number }[] = [];
   let match: RegExpExecArray | null;
 
   while ((match = beatRegex.exec(markdown)) !== null) {
     matches.push({
       id: match[1]!,
-      label: match[2]!,
+      status: match[2] ?? null,
+      label: match[3]!,
       index: match.index,
       end: match.index + match[0].length,
     });
   }
 
   if (matches.length === 0) {
-    const { brief, preamble: cleanPreamble } = stripChapterBrief(markdown);
-    return { preamble: cleanPreamble, chapterBrief: brief, blocks: [], postamble: "" };
+    const { summary: chapterSummary, preamble: cleanPreamble } = extractChapterSummary(markdown);
+    return { preamble: cleanPreamble, chapterSummary, blocks: [], postamble: "" };
   }
 
   const rawPreamble = markdown.slice(0, matches[0]!.index);
-  const { brief: chapterBrief, preamble } = stripChapterBrief(rawPreamble);
+  const { summary: chapterSummary, preamble } = extractChapterSummary(rawPreamble);
 
   // Find where postamble starts: the <!-- /chapter --> marker after the last beat
   const lastMatch = matches[matches.length - 1]!;
@@ -381,31 +505,32 @@ function parseBeatsGrouped(markdown: string): {
     const current = matches[i]!;
     const nextStart = i + 1 < matches.length ? matches[i + 1]!.index : contentEnd;
     const rawProse = markdown.slice(current.end, nextStart).trim();
-    const { comment, prose } = stripSummaryComment(rawProse);
-    blocks.push({ id: current.id, label: current.label, summaryComment: comment, prose });
+    const { summary, prose } = extractBeatSummary(rawProse);
+    blocks.push({ id: current.id, label: current.label, status: current.status, summary, prose });
   }
 
-  return { preamble, chapterBrief, blocks, postamble };
+  return { preamble, chapterSummary, blocks, postamble };
 }
 
 function reassembleChapter(
   preamble: string,
   blocks: BeatBlock[],
   postamble: string,
-  chapterBrief?: string | null
+  chapterSummary?: string | null
 ): string {
-  let result = injectChapterBrief(preamble, chapterBrief ?? null);
+  let result = injectChapterSummary(preamble, chapterSummary ?? null);
   // Ensure preamble ends with a newline before first beat
   if (result.length > 0 && !result.endsWith("\n")) {
     result += "\n";
   }
-  const emittedBriefs = new Set<string>();
+  const emittedSummaries = new Set<string>();
   for (const block of blocks) {
-    result += `<!-- beat:${block.id} | ${block.label} -->\n`;
+    const status = block.status ?? "planned";
+    result += `${buildBeatMarker(block.id, status, block.label)}\n`;
     // Emit summary comment only for the first block per beat ID (variant dedup)
-    if (block.summaryComment && !emittedBriefs.has(block.id)) {
-      result += `${block.summaryComment}\n`;
-      emittedBriefs.add(block.id);
+    if (block.summary && !emittedSummaries.has(block.id)) {
+      result += `${buildSummaryBlock(block.summary)}\n`;
+      emittedSummaries.add(block.id);
     }
     if (block.prose) {
       result += `${block.prose}\n\n`;
@@ -433,7 +558,7 @@ function removeAllBeatMarkers(
     }
   }
 
-  const updated = reassembleChapter(parsed.preamble, kept, parsed.postamble, parsed.chapterBrief);
+  const updated = reassembleChapter(parsed.preamble, kept, parsed.postamble, parsed.chapterSummary);
   return { updated, removedBlocks };
 }
 
@@ -457,11 +582,12 @@ function appendBeatBlock(
     throw new Error(`Beat marker for ${beatId} not found in chapter file — cannot append variant`);
   }
 
-  // Insert the new block after the last occurrence (variant — no summary comment)
-  const newBlock: BeatBlock = { id: beatId, label, summaryComment: null, prose: content };
+  // Insert the new block after the last occurrence (variant — no summary)
+  const existingBlock = parsed.blocks[lastIdx]!;
+  const newBlock: BeatBlock = { id: beatId, label, status: existingBlock.status, summary: null, prose: content };
   parsed.blocks.splice(lastIdx + 1, 0, newBlock);
 
-  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterBrief);
+  return reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterSummary);
 }
 
 // ---------------------------------------------------------------------------
@@ -703,24 +829,22 @@ export async function createChapter(
     throw new Error(`Part "${partId}" does not exist. Create it first with create(target='part').`);
   }
 
-  // Create the chapter meta file first so we can derive the chapter-brief
+  // Create the slim meta sidecar (navigation index only)
   const metaPath = join(partDir, `${chapterId}.meta.json`);
-  const meta: ChapterMeta = {
+  const slimMeta: SlimChapterMeta = {
     title,
-    summary,
     pov,
     location,
     timeline_position: timelinePosition,
-    status: "planning",
     beats: [],
   };
-  await writeJson(metaPath, meta);
+  await writeJson(metaPath, slimMeta);
 
-  // Create the chapter prose file with a title, optional chapter-brief, and closing marker
+  // Create the chapter prose file with title, optional chapter-summary, and closing marker
   const mdPath = join(partDir, `${chapterId}.md`);
-  const chapterBrief = buildChapterBriefComment(meta);
-  const mdContent = chapterBrief
-    ? `# ${title}\n${chapterBrief}\n\n<!-- /chapter -->\n`
+  const chapterSummaryComment = summary ? buildChapterSummaryBlock(summary) : "";
+  const mdContent = chapterSummaryComment
+    ? `# ${title}\n${chapterSummaryComment}\n\n<!-- /chapter -->\n`
     : `# ${title}\n\n<!-- /chapter -->\n`;
   await writeMd(mdPath, mdContent);
 
@@ -778,6 +902,21 @@ export interface BeatMeta {
   depended_by: string[];
 }
 
+// Slim sidecar — only fields the tool needs for indexing
+interface SlimBeatMeta {
+  id: string;
+  characters: string[];
+  dirty_reason: string | null;
+}
+
+interface SlimChapterMeta {
+  title: string;
+  pov: string;
+  location: string;
+  timeline_position: string;
+  beats: SlimBeatMeta[];
+}
+
 export interface ChapterMeta {
   title: string;
   summary: string;
@@ -789,10 +928,91 @@ export interface ChapterMeta {
   beats: BeatMeta[];
 }
 
+/**
+ * Read chapter metadata by merging markdown (source of truth for summaries,
+ * labels, status) with the slim JSON sidecar (characters, dirty_reason, pov,
+ * location, timeline). Falls back gracefully if sidecar is missing.
+ *
+ * Also supports legacy full-fat meta files for backward compatibility.
+ */
 export async function getChapterMeta(projectId: string, partId: string, chapterId: string): Promise<ChapterMeta> {
-  return readJson<ChapterMeta>(
-    join(projectRoot(projectId), "parts", partId, `${chapterId}.meta.json`)
-  );
+  const root = projectRoot(projectId);
+  const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
+  const mdPath = join(root, "parts", partId, `${chapterId}.md`);
+
+  // Parse markdown for beat structure and summaries
+  let mdBeats: BeatBlock[] = [];
+  let chapterSummary: string | null = null;
+  let chapterTitle = chapterId;
+  if (existsSync(mdPath)) {
+    const markdown = await readMd(mdPath);
+    const parsed = parseBeatsGrouped(markdown);
+    mdBeats = parsed.blocks;
+    chapterSummary = parsed.chapterSummary;
+    // Extract title from heading
+    const headingMatch = parsed.preamble.match(/^#\s+(.+)$/m);
+    if (headingMatch) chapterTitle = headingMatch[1]!;
+  }
+
+  // Read sidecar if it exists
+  let sidecar: Record<string, unknown> | null = null;
+  if (existsSync(metaPath)) {
+    sidecar = await readJson<Record<string, unknown>>(metaPath);
+  }
+
+  // Determine if this is a legacy full-fat meta or slim meta
+  // Legacy metas have beats with "summary" and "label" fields
+  const sidecarBeats = (sidecar?.beats as Array<Record<string, unknown>>) ?? [];
+  const isLegacyMeta = sidecarBeats.length > 0 && sidecarBeats[0] && ("summary" in sidecarBeats[0] || "label" in sidecarBeats[0]);
+
+  if (isLegacyMeta && mdBeats.length === 0) {
+    // Pure legacy mode — no markdown beats yet, return as-is from JSON
+    return sidecar as unknown as ChapterMeta;
+  }
+
+  // Build beat index from sidecar
+  const sidecarBeatMap = new Map<string, Record<string, unknown>>();
+  for (const b of sidecarBeats) {
+    if (b.id) sidecarBeatMap.set(b.id as string, b);
+  }
+
+  // Deduplicate mdBeats by ID (variants share IDs — take first occurrence for metadata)
+  const seenIds = new Set<string>();
+  const uniqueMdBeats = mdBeats.filter(b => {
+    if (seenIds.has(b.id)) return false;
+    seenIds.add(b.id);
+    return true;
+  });
+
+  // Merge: markdown wins for summary/label/status, sidecar wins for characters/dirty_reason
+  const beats: BeatMeta[] = uniqueMdBeats.map(mdBeat => {
+    const sb = sidecarBeatMap.get(mdBeat.id);
+    return {
+      id: mdBeat.id,
+      label: mdBeat.label,
+      summary: mdBeat.summary ?? (sb?.summary as string ?? ""),
+      status: mdBeat.status ?? (sb?.status as string ?? "planned"),
+      dirty_reason: (sb?.dirty_reason as string | null) ?? null,
+      characters: (sb?.characters as string[]) ?? [],
+      depends_on: (sb?.depends_on as string[]) ?? [],
+      depended_by: (sb?.depended_by as string[]) ?? [],
+    };
+  });
+
+  // Determine chapter-level status from beat statuses
+  const hasDirty = beats.some(b => b.status === "dirty" || b.status === "conflict");
+  const chapterStatus = hasDirty ? "dirty" : (sidecar?.status as string ?? "planning");
+
+  return {
+    title: (sidecar?.title as string) ?? chapterTitle,
+    summary: chapterSummary ?? (sidecar?.summary as string ?? ""),
+    pov: (sidecar?.pov as string) ?? "",
+    location: (sidecar?.location as string) ?? "",
+    timeline_position: (sidecar?.timeline_position as string) ?? "",
+    status: chapterStatus,
+    dirty_reason: (sidecar?.dirty_reason as string | null) ?? null,
+    beats,
+  };
 }
 
 export async function getChapterProse(projectId: string, partId: string, chapterId: string): Promise<string> {
@@ -1593,56 +1813,102 @@ export interface WriteResult {
 }
 
 // ---------------------------------------------------------------------------
-// Beat summary comment refresh
+// Migration: legacy meta → markdown-first format
 // ---------------------------------------------------------------------------
 
 /**
- * Regenerate all summary comments (chapter-brief + beat-briefs) in a
- * chapter's prose file from the canonical metadata. Returns the .md
- * path if anything changed, null if all comments were already up to date.
+ * Migrate a chapter from legacy full-fat .meta.json to markdown-first format.
+ * Reads summaries/labels/status from legacy JSON, writes them into the .md file
+ * as structured comments, then slims the .meta.json to navigation-only data.
+ *
+ * Returns the list of modified file paths.
  */
-export async function refreshSummaryComments(
+export async function migrateChapterToMarkdownFirst(
   projectId: string,
   partId: string,
   chapterId: string
-): Promise<string | null> {
-  const meta = await getChapterMeta(projectId, partId, chapterId);
-  const mdPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.md`);
-  const rawMarkdown = await readMd(mdPath);
+): Promise<string[]> {
+  const root = projectRoot(projectId);
+  const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
+  const mdPath = join(root, "parts", partId, `${chapterId}.md`);
 
-  // Strip ALL managed comments from the entire file before parsing.
-  // This handles duplicates, multi-line briefs, and stray/misplaced comments.
-  const markdown = rawMarkdown
-    .replace(CHAPTER_BRIEF_GLOBAL, "")
-    .replace(BEAT_BRIEF_GLOBAL, "");
-  let changed = markdown !== rawMarkdown;
+  if (!existsSync(metaPath)) return [];
 
+  const legacyMeta = await readJson<Record<string, unknown>>(metaPath);
+  const legacyBeats = (legacyMeta.beats as Array<Record<string, unknown>>) ?? [];
+
+  // Check if already migrated (slim format — no "summary" or "label" on beats,
+  // and no chapter-level "summary" field in sidecar)
+  const beatsAreSlim = legacyBeats.length === 0 || (!("summary" in legacyBeats[0]!) && !("label" in legacyBeats[0]!));
+  const chapterSummaryInSidecar = "summary" in legacyMeta;
+
+  // Also check markdown for legacy comments that need cleanup
+  const markdown = existsSync(mdPath) ? await readMd(mdPath) : `# ${legacyMeta.title ?? chapterId}\n\n<!-- /chapter -->\n`;
+  const hasLegacyComments = /<!--\s*chapter-brief\s*\[/.test(markdown) || /<!--\s*beat-brief:\S+\s*\[/.test(markdown);
+
+  if (beatsAreSlim && !chapterSummaryInSidecar && !hasLegacyComments) {
+    return []; // Already migrated
+  }
   const parsed = parseBeatsGrouped(markdown);
 
-  // Chapter-brief — always regenerate from meta
-  const newChapterBrief = buildChapterBriefComment(meta);
-  if (changed || parsed.chapterBrief !== newChapterBrief) {
-    parsed.chapterBrief = newChapterBrief;
-    changed = true;
+  // Inject chapter summary from legacy meta
+  const chapterSummary = (legacyMeta.summary as string) ?? "";
+  if (chapterSummary && !parsed.chapterSummary) {
+    parsed.chapterSummary = chapterSummary;
   }
 
-  // Beat-briefs
-  const beatMap = new Map(meta.beats.map((b) => [b.id, b]));
+  // Build index of legacy beat data
+  const legacyBeatMap = new Map<string, Record<string, unknown>>();
+  for (const lb of legacyBeats) {
+    if (lb.id) legacyBeatMap.set(lb.id as string, lb);
+  }
+
+  // Update existing blocks with legacy data
   for (const block of parsed.blocks) {
-    const beatMeta = beatMap.get(block.id);
-    if (!beatMeta) continue;
-    const newComment = buildSummaryComment(beatMeta);
-    if (block.summaryComment !== newComment) {
-      block.summaryComment = newComment;
-      changed = true;
+    const lb = legacyBeatMap.get(block.id);
+    if (!lb) continue;
+    // Inject label if it differs from the legacy one
+    if (lb.label && typeof lb.label === "string") block.label = lb.label;
+    // Inject status
+    if (lb.status && typeof lb.status === "string") block.status = lb.status;
+    // Inject summary
+    if (lb.summary && typeof lb.summary === "string" && !block.summary) {
+      block.summary = lb.summary;
     }
   }
 
-  if (!changed) return null;
+  // Add any beats that are in meta but not in markdown (planned beats with no marker)
+  const existingIds = new Set(parsed.blocks.map(b => b.id));
+  for (const lb of legacyBeats) {
+    if (existingIds.has(lb.id as string)) continue;
+    parsed.blocks.push({
+      id: lb.id as string,
+      label: (lb.label as string) ?? "",
+      status: (lb.status as string) ?? "planned",
+      summary: (lb.summary as string) ?? "",
+      prose: "",
+    });
+  }
 
-  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterBrief);
+  // Reassemble and write markdown
+  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterSummary);
   await writeMd(mdPath, updated);
-  return mdPath;
+
+  // Slim the sidecar
+  const slimMeta: SlimChapterMeta = {
+    title: (legacyMeta.title as string) ?? chapterId,
+    pov: (legacyMeta.pov as string) ?? "",
+    location: (legacyMeta.location as string) ?? "",
+    timeline_position: (legacyMeta.timeline_position as string) ?? "",
+    beats: legacyBeats.map(lb => ({
+      id: lb.id as string,
+      characters: (lb.characters as string[]) ?? [],
+      dirty_reason: (lb.dirty_reason as string | null) ?? null,
+    })),
+  };
+  await writeJson(metaPath, slimMeta);
+
+  return [mdPath, metaPath];
 }
 
 // ---------------------------------------------------------------------------
@@ -1669,32 +1935,68 @@ export async function updateChapterMeta(
   chapterId: string,
   patch: Partial<ChapterMeta>
 ): Promise<WriteResult[]> {
+  const root = projectRoot(projectId);
+  const results: WriteResult[] = [];
+
+  // Read current state from merged view
   const current = await getChapterMeta(projectId, partId, chapterId);
-  const updated = { ...current, ...patch };
+
+  // Merge beats
+  let mergedBeats = current.beats;
   if (patch.beats) {
-    // Merge each patch beat into the matching current beat by ID,
-    // preserving fields not present in the patch beat.
-    updated.beats = current.beats.map((currentBeat) => {
+    mergedBeats = current.beats.map((currentBeat) => {
       const patchBeat = patch.beats!.find((pb) => pb.id === currentBeat.id);
       return patchBeat ? { ...currentBeat, ...patchBeat } : currentBeat;
     });
-  } else {
-    updated.beats = current.beats;
   }
-  const path = join(projectRoot(projectId), "parts", partId, `${chapterId}.meta.json`);
-  await writeJson(path, updated);
 
-  const results: WriteResult[] = [
-    { path, description: `Updated ${partId}/${chapterId}.meta.json` },
-  ];
+  // --- Update markdown file (summaries, labels, status) ---
+  const mdPath = join(root, "parts", partId, `${chapterId}.md`);
+  if (existsSync(mdPath)) {
+    const markdown = await readMd(mdPath);
+    const parsed = parseBeatsGrouped(markdown);
 
-  // Refresh summary comments (chapter-brief + beat-briefs) in prose.
-  // Always refresh — any patch to summary, status, dirty_reason, or beats
-  // could affect either chapter-brief or beat-briefs.
-  const mdPath = await refreshSummaryComments(projectId, partId, chapterId);
-  if (mdPath) {
-    results.push({ path: mdPath, description: `Refreshed summaries in ${chapterId}.md` });
+    // Update chapter summary in preamble
+    const newChapterSummary = patch.summary ?? current.summary;
+    if (newChapterSummary !== parsed.chapterSummary) {
+      parsed.chapterSummary = newChapterSummary || null;
+    }
+
+    // Update beat blocks from merged data
+    for (const block of parsed.blocks) {
+      const beatData = mergedBeats.find(b => b.id === block.id);
+      if (!beatData) continue;
+      // Update label, status, summary from the merged beat data
+      if (patch.beats) {
+        const patchBeat = patch.beats.find(pb => pb.id === block.id);
+        if (patchBeat) {
+          if (patchBeat.label !== undefined) block.label = patchBeat.label;
+          if (patchBeat.status !== undefined) block.status = patchBeat.status;
+          if (patchBeat.summary !== undefined) block.summary = patchBeat.summary;
+        }
+      }
+    }
+
+    const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterSummary);
+    await writeMd(mdPath, updated);
+    results.push({ path: mdPath, description: `Updated ${partId}/${chapterId}.md` });
   }
+
+  // --- Update slim sidecar (characters, dirty_reason, pov, location, timeline) ---
+  const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
+  const slimMeta: SlimChapterMeta = {
+    title: patch.title ?? current.title,
+    pov: patch.pov ?? current.pov,
+    location: patch.location ?? current.location,
+    timeline_position: patch.timeline_position ?? current.timeline_position,
+    beats: mergedBeats.map(b => ({
+      id: b.id,
+      characters: b.characters,
+      dirty_reason: b.dirty_reason,
+    })),
+  };
+  await writeJson(metaPath, slimMeta);
+  results.push({ path: metaPath, description: `Updated ${partId}/${chapterId}.meta.json` });
 
   return results;
 }
@@ -1723,9 +2025,6 @@ export async function writeBeatProse(
   }
   await writeMd(mdPath, updated);
 
-  // Refresh beat-brief comments from current meta
-  await refreshSummaryComments(projectId, partId, chapterId);
-
   return {
     path: mdPath,
     description: `${append ? "Appended variant" : "Updated"} prose for ${partId}/${chapterId}:${beatId}`,
@@ -1747,25 +2046,38 @@ export async function addBeat(
     throw new Error(`Beat "${beatDef.id}" already exists in ${partId}/${chapterId}.`);
   }
 
+  // Write beat marker + summary to markdown
   const mdPath = join(root, "parts", partId, `${chapterId}.md`);
   const markdown = await readMd(mdPath);
-  const updated = addBeatMarker(markdown, beatDef.id, beatDef.label, afterBeatId);
+  const updated = addBeatMarkerToMarkdown(
+    markdown, beatDef.id, beatDef.status ?? "planned",
+    beatDef.label, beatDef.summary, afterBeatId
+  );
   await writeMd(mdPath, updated);
 
-  if (afterBeatId) {
-    const idx = meta.beats.findIndex((b) => b.id === afterBeatId);
-    meta.beats.splice(idx + 1, 0, beatDef);
-  } else {
-    meta.beats.push(beatDef);
-  }
+  // Add slim entry to sidecar
+  const slimBeat: SlimBeatMeta = {
+    id: beatDef.id,
+    characters: beatDef.characters,
+    dirty_reason: beatDef.dirty_reason,
+  };
   const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
-  await writeJson(metaPath, meta);
-
-  // Inject initial beat-brief comment from the new beat's metadata
-  await refreshSummaryComments(projectId, partId, chapterId);
+  let sidecar: SlimChapterMeta;
+  if (existsSync(metaPath)) {
+    sidecar = await readJson<SlimChapterMeta>(metaPath);
+  } else {
+    sidecar = { title: chapterId, pov: "", location: "", timeline_position: "", beats: [] };
+  }
+  if (afterBeatId) {
+    const idx = sidecar.beats.findIndex((b) => b.id === afterBeatId);
+    sidecar.beats.splice(idx + 1, 0, slimBeat);
+  } else {
+    sidecar.beats.push(slimBeat);
+  }
+  await writeJson(metaPath, sidecar);
 
   return [
-    { path: mdPath, description: `Added beat marker ${beatDef.id} to ${chapterId}.md` },
+    { path: mdPath, description: `Added beat ${beatDef.id} to ${chapterId}.md` },
     { path: metaPath, description: `Added beat ${beatDef.id} to ${chapterId}.meta.json` },
   ];
 }
@@ -1792,10 +2104,14 @@ export async function removeBeat(
   await writeMd(mdPath, updated);
   results.push({ path: mdPath, description: `Removed all blocks for beat ${beatId} from ${chapterId}.md` });
 
-  meta.beats = meta.beats.filter((b) => b.id !== beatId);
+  // Update slim sidecar — remove the beat entry
   const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
-  await writeJson(metaPath, meta);
-  results.push({ path: metaPath, description: `Removed beat ${beatId} from ${chapterId}.meta.json` });
+  if (existsSync(metaPath)) {
+    const sidecar = await readJson<SlimChapterMeta>(metaPath);
+    sidecar.beats = sidecar.beats.filter((b: SlimBeatMeta) => b.id !== beatId);
+    await writeJson(metaPath, sidecar);
+    results.push({ path: metaPath, description: `Removed beat ${beatId} from ${chapterId}.meta.json` });
+  }
 
   if (removedBlocks.length > 0) {
     const combinedProse = removedBlocks
@@ -1878,12 +2194,17 @@ export async function reorderBeats(
 
   const previous_order = meta.beats.map((b) => b.id);
 
-  // Reorder meta beats
-  const beatMap = new Map(meta.beats.map((b) => [b.id, b]));
-  meta.beats = beatOrder.map((id) => beatMap.get(id)!);
+  // Reorder sidecar beats
   const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
-  await writeJson(metaPath, meta);
-  results.push({ path: metaPath, description: `Reordered beats in ${partId}/${chapterId}.meta.json` });
+  if (existsSync(metaPath)) {
+    const sidecar = await readJson<SlimChapterMeta>(metaPath);
+    const sidecarBeatMap = new Map(sidecar.beats.map((b: SlimBeatMeta) => [b.id, b]));
+    sidecar.beats = beatOrder
+      .filter(id => sidecarBeatMap.has(id))
+      .map(id => sidecarBeatMap.get(id)!);
+    await writeJson(metaPath, sidecar);
+    results.push({ path: metaPath, description: `Reordered beats in ${partId}/${chapterId}.meta.json` });
+  }
 
   // Reorder prose blocks (variants stay grouped in original internal order)
   const mdPath = join(root, "parts", partId, `${chapterId}.md`);
@@ -1902,7 +2223,7 @@ export async function reorderBeats(
     if (group) newBlocks.push(...group);
   }
 
-  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble, parsed.chapterBrief);
+  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble, parsed.chapterSummary);
   await writeMd(mdPath, updated);
   results.push({ path: mdPath, description: `Reordered beat markers in ${partId}/${chapterId}.md` });
 
@@ -2001,7 +2322,7 @@ export async function selectBeatVariant(
     }
   }
 
-  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble, parsed.chapterBrief);
+  const updated = reassembleChapter(parsed.preamble, newBlocks, parsed.postamble, parsed.chapterSummary);
   await writeMd(mdPath, updated);
   results.push({ path: mdPath, description: `Selected variant ${keepIndex} for ${beatId} in ${chapterId}.md` });
 
@@ -2323,7 +2644,7 @@ export async function editBeatProse(
 
   // All edits passed — update the block and write to disk
   parsed.blocks[target.idx]! = { ...target.block, prose: text };
-  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterBrief);
+  const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterSummary);
   await writeMd(mdPath, updated);
 
   return {
@@ -2347,6 +2668,7 @@ export async function setNodeStatus(
   const desc = isDirty ? `dirty: ${reason}` : "clean";
 
   if (parts.length === 1) {
+    // Part-level dirty/clean
     const part = await getPart(projectId, partId);
     part.status = isDirty ? "dirty" : "clean";
     part.dirty_reason = isDirty ? reason! : null;
@@ -2358,24 +2680,42 @@ export async function setNodeStatus(
     const [chapterId, beatId] = chapterBeat.split(":");
 
     if (!beatId) {
-      const meta = await getChapterMeta(projectId, partId, chapterId!);
-      meta.status = isDirty ? "dirty" : "clean";
-      meta.dirty_reason = isDirty ? reason! : null;
-      const path = join(root, "parts", partId, `${chapterId}.meta.json`);
-      await writeJson(path, meta);
-      results.push({ path, description: `Marked ${partId}/${chapterId} ${desc}` });
+      // Chapter-level dirty/clean — dirty_reason stays in sidecar
+      const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
+      if (existsSync(metaPath)) {
+        const sidecar = await readJson<Record<string, unknown>>(metaPath);
+        sidecar.dirty_reason = isDirty ? reason! : null;
+        await writeJson(metaPath, sidecar);
+        results.push({ path: metaPath, description: `Marked ${partId}/${chapterId} ${desc}` });
+      }
     } else {
-      const meta = await getChapterMeta(projectId, partId, chapterId!);
-      const beat = meta.beats.find((b) => b.id === beatId);
-      if (beat) {
-        beat.status = isDirty ? "dirty" : "written";
-        beat.dirty_reason = isDirty ? reason! : null;
-        const path = join(root, "parts", partId, `${chapterId}.meta.json`);
-        await writeJson(path, meta);
-        results.push({ path, description: `Marked ${partId}/${chapterId}:${beatId} ${desc}` });
-        const mdPath = await refreshSummaryComments(projectId, partId, chapterId!);
-        if (mdPath) {
-          results.push({ path: mdPath, description: `Refreshed beat summaries in ${chapterId}.md` });
+      // Beat-level dirty/clean — update status in markdown, dirty_reason in sidecar
+      const beatStatus = isDirty ? "dirty" : "written";
+
+      // Update beat marker status in markdown
+      const mdPath = join(root, "parts", partId, `${chapterId}.md`);
+      if (existsSync(mdPath)) {
+        const markdown = await readMd(mdPath);
+        const parsed = parseBeatsGrouped(markdown);
+        for (const block of parsed.blocks) {
+          if (block.id === beatId) {
+            block.status = beatStatus;
+          }
+        }
+        const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterSummary);
+        await writeMd(mdPath, updated);
+        results.push({ path: mdPath, description: `Marked ${partId}/${chapterId}:${beatId} ${desc} in markdown` });
+      }
+
+      // Update dirty_reason in sidecar
+      const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
+      if (existsSync(metaPath)) {
+        const sidecar = await readJson<SlimChapterMeta>(metaPath);
+        const sidecarBeat = sidecar.beats.find((b: SlimBeatMeta) => b.id === beatId);
+        if (sidecarBeat) {
+          sidecarBeat.dirty_reason = isDirty ? reason! : null;
+          await writeJson(metaPath, sidecar);
+          results.push({ path: metaPath, description: `Updated dirty_reason for ${beatId} in sidecar` });
         }
       }
     }
