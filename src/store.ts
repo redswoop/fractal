@@ -505,7 +505,7 @@ export async function loadTemplate(templateId: string): Promise<ProjectTemplate>
   const templatePath = join(TEMPLATES_ROOT, `${templateId}.json`);
   if (!existsSync(templatePath)) {
     throw new Error(
-      `Template "${templateId}" not found. Use list_templates to see available templates.`
+      `Template "${templateId}" not found. Use template(action='list') to see available templates.`
     );
   }
   return readJson<ProjectTemplate>(templatePath);
@@ -692,7 +692,7 @@ export async function createChapter(
 
   // Ensure part directory exists
   if (!existsSync(partDir)) {
-    throw new Error(`Part "${partId}" does not exist. Create it first with create_part.`);
+    throw new Error(`Part "${partId}" does not exist. Create it first with create(target='part').`);
   }
 
   // Create the chapter meta file first so we can derive the chapter-brief

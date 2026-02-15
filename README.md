@@ -24,7 +24,7 @@ Fractal manages **projects** — each one a novel, novella, or other long-form w
 - **Inline annotations** — notes, queries, continuity flags embedded in prose
 - **Git versioning** — every write auto-commits with a meaningful message
 
-There are 38 tools covering reads, writes, search, structure manipulation, and session management.
+There are 12 consolidated tools covering reads, writes, search, structure manipulation, and session management.
 
 ## Examples
 
@@ -52,7 +52,7 @@ You talk to Claude normally. Claude calls Fractal tools behind the scenes. These
 >
 > I've created character canon for Unit 7, Marguerite, and Dale, plus location files for the bakery and the factory. Want to review the character sheets before we start writing?
 
-Behind the scenes that's `create_project`, `create_part` (x2), `create_chapter` (x4), `update_canon` (x5). You never see tool calls — just the conversation.
+Behind the scenes that's `create(target='project')`, `create(target='part')` (x2), `create(target='chapter')` (x4), `write(target='canon')` (x5). You never see tool calls — just the conversation.
 
 ### Writing a scene
 
@@ -87,7 +87,7 @@ Before writing, Claude loaded the canon files. It knows Unit 7 is 8 feet tall, s
 > >
 > > "I am a machine."
 >
-> *uses `edit_beat_prose` to surgically replace just those lines*
+> *uses `edit(target='beat')` to surgically replace just those lines*
 >
 > Updated:
 > > "You followed it. That's all you did."
@@ -98,7 +98,7 @@ Before writing, Claude loaded the canon files. It knows Unit 7 is 8 feet tall, s
 >
 > The rest of the beat is untouched.
 
-`edit_beat_prose` does surgical find-and-replace within a single beat. No risk of accidentally changing prose in a different scene.
+`edit(target='beat')` does surgical find-and-replace within a single beat. No risk of accidentally changing prose in a different scene.
 
 ### Canon changes that ripple
 
@@ -248,7 +248,7 @@ Templates configure which canon types a project starts with:
 | `litrpg` | characters, locations, systems, factions, items | Progression fantasy, GameLit |
 | `fanfic` | characters, locations, canon-deviations, original-additions | Stories set in existing universes |
 
-Templates are scaffolding, not cages. You can always create new canon types on the fly — just call `update_canon` with any type name and the directory is created automatically. A romance writer might start with `fiction-default` and add `relationships` and `sensory-palette` types as the story demands them.
+Templates are scaffolding, not cages. You can always create new canon types on the fly — just call `write(target='canon')` with any type name and the directory is created automatically. A romance writer might start with `fiction-default` and add `relationships` and `sensory-palette` types as the story demands them.
 
 Each template includes a GUIDE.md that explains when to use each canon type, readable via `get_context`.
 
@@ -300,7 +300,7 @@ Point your MCP config at the running server's `/mcp` endpoint.
 
 ```
 src/
-  server.ts   — MCP server, all 38 tool registrations (Fastify + Streamable HTTP)
+  server.ts   — MCP server, 12 consolidated tool registrations (Fastify + Streamable HTTP)
   store.ts    — Filesystem operations (read/write projects, chapters, canon, scratch)
   git.ts      — Auto-commit and session-commit helpers
 templates/    — Genre presets (fiction-default, worldbuilding, litrpg, fanfic)
@@ -308,53 +308,22 @@ templates/    — Genre presets (fiction-default, worldbuilding, litrpg, fanfic)
 
 ## Tools
 
-### Read
+The API is 12 consolidated tools. Six verb-based tools (`create`, `update`, `write`, `edit`, `remove`, `template`) use a `target` or `action` discriminator to dispatch to the right operation.
 
-| Tool | Description |
-|------|-------------|
-| `hello` | Proof-of-life greeting |
-| `list_projects` | List all projects |
-| `list_templates` | Available project templates (fiction, worldbuilding, LitRPG, fanfic) |
-| `get_project` | Project metadata — title, logline, status, themes, parts list, active canon types |
-| `get_part` | Part metadata — title, summary, arc, chapters |
-| `get_chapter_meta` | Chapter metadata — beats index with statuses and summaries |
-| `get_chapter_prose` | Full chapter markdown with beat markers |
-| `get_beat_prose` | Extract a single beat's prose |
-| `get_beat_variants` | All variant blocks for a beat |
-| `get_canon` | Character, location, or other canon entry |
-| `list_canon` | List all canon entries of a type |
-| `get_scratch_index` | Scratch folder contents |
-| `get_scratch` | Read a scratch file |
-| `search` | Full-text search across prose, canon, and scratch |
-| `get_dirty_nodes` | All nodes needing review, with reasons |
-| `get_context` | Batch read — fetch multiple items in one call |
-| `get_notes` | Scan for inline annotations (@note, @dev, @line, @continuity, @query, @flag) |
-
-### Write
-
-| Tool | Description |
-|------|-------------|
-| `create_project` | Bootstrap a new project — optionally from a genre template |
-| `create_part` | Create a part directory |
-| `create_chapter` | Create a chapter (prose .md + .meta.json) |
-| `update_project` | Patch project metadata |
-| `update_part` | Patch part metadata |
-| `update_chapter_meta` | Patch chapter metadata / beats |
-| `update_canon` | Create or rewrite a canon entry (any type — characters, factions, items, etc.) |
-| `write_beat_prose` | Insert or replace prose for a beat (supports append for variants) |
-| `edit_beat_prose` | Surgical find/replace within a beat |
-| `add_beat` | Add a beat to a chapter's structure |
-| `remove_beat` | Remove a beat (prose archived to scratch) |
-| `select_beat_variant` | Pick a variant, archive the rest |
-| `reorder_beats` | Reorder beats within a chapter |
-| `mark_dirty` | Flag a node as needing review |
-| `mark_clean` | Clear dirty status |
-| `add_scratch` | Add a file to the scratch folder |
-| `promote_scratch` | Move scratch content into the narrative structure |
-| `add_note` | Insert an inline annotation |
-| `resolve_note` | Remove an addressed annotation |
-| `resolve_notes` | Batch-remove addressed annotations |
-| `session_summary` | Git commit summarizing the working session |
+| Tool | Targets / Actions | Description |
+|------|-------------------|-------------|
+| `list_projects` | — | List all projects with status briefing (dirty nodes, open notes, last session) |
+| `get_context` | — | Primary read tool — returns any combination of project data in one call. Supports: project_meta, parts, chapter_meta, chapter_prose, beats, beat_variants, canon (with `#section` notation), scratch, scratch_index, dirty_nodes, notes, canon_list, guide, search |
+| `create` | project, part, chapter, beat, scratch, note | Create new entities across the project hierarchy |
+| `update` | project, part, chapter, node | Update metadata; mark nodes dirty/clean with reasons |
+| `write` | beat, canon | Write/replace content — beat prose, canon entries, or promote scratch into beats |
+| `edit` | beat, canon | Surgical find/replace with atomic ordered edits |
+| `remove` | beat, notes | Remove beats (prose archived to scratch) or resolve annotations |
+| `template` | list, get, save, apply | Manage project templates (fiction, worldbuilding, LitRPG, fanfic) |
+| `select_variant` | — | Choose one variant of a beat, archive the rest to scratch |
+| `reorder_beats` | — | Reorder beats within a chapter (meta and prose updated together) |
+| `session_summary` | — | Create a session-level git commit summarizing work accomplished |
+| `refresh_summaries` | — | Regenerate chapter-brief and beat-brief comments from metadata |
 
 ## File format
 
@@ -396,4 +365,4 @@ server {
 
 ## Testing
 
-`fractal-test-plan.md` contains a 9-phase verification suite using a disposable test project. See `claude.md` for full details on the testing strategy.
+`test-templates.sh` is the comprehensive test suite (45 tests). See `CLAUDE.md` for testing rules.
