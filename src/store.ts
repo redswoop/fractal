@@ -113,6 +113,7 @@ type AnnotationType = (typeof ANNOTATION_TYPES)[number];
 const ANNOTATION_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*?))?\s*-->$/;
 const BEAT_MARKER_REGEX = /^<!--\s*beat:(\S+)\s*\|\s*(.+?)\s*-->/;
 const BEAT_BRIEF_REGEX = /^<!--\s*beat-brief:(\S+)\s*\[(PLANNED|WRITTEN|DIRTY(?::\s*[^\]]*)?|CONFLICT)\]\s*(.*?)\s*-->$/;
+const BEAT_BRIEF_GLOBAL = /<!--\s*beat-brief:\S+\s*\[[^\]]+\][\s\S]*?-->\n?/g;
 
 export interface ParsedAnnotation {
   id: string;
@@ -222,18 +223,16 @@ function injectChapterBrief(preamble: string, brief: string | null): string {
  * looking for a beat-brief comment. Returns the comment and clean prose.
  */
 function stripSummaryComment(raw: string): { comment: string | null; prose: string } {
-  const lines = raw.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i]!.trim();
-    if (BEAT_BRIEF_REGEX.test(trimmed)) {
-      const comment = trimmed;
-      const remaining = [...lines.slice(0, i), ...lines.slice(i + 1)].join("\n").trim();
-      return { comment, prose: remaining };
-    }
-    // Stop looking once we hit actual prose (non-empty, non-comment line)
-    if (trimmed && !trimmed.startsWith("<!--")) break;
-  }
-  return { comment: null, prose: raw };
+  // Handle both single-line and multi-line beat-brief comments,
+  // including duplicates from the previous single-line-only matching bug.
+  const regex = /<!--\s*beat-brief:\S+\s*\[[^\]]+\][\s\S]*?-->\n?/g;
+  let comment: string | null = null;
+  const cleaned = raw.replace(regex, (match) => {
+    if (!comment) comment = match.replace(/\n$/, "");
+    return "";
+  });
+  if (!comment) return { comment: null, prose: raw };
+  return { comment, prose: cleaned.trim() };
 }
 
 // ---------------------------------------------------------------------------
@@ -1520,9 +1519,11 @@ export async function refreshSummaryComments(
   const mdPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.md`);
   const rawMarkdown = await readMd(mdPath);
 
-  // Strip ALL chapter-brief comments from the entire file before parsing.
-  // This handles duplicates, multi-line briefs, and stray briefs in beat prose.
-  const markdown = rawMarkdown.replace(CHAPTER_BRIEF_GLOBAL, "");
+  // Strip ALL managed comments from the entire file before parsing.
+  // This handles duplicates, multi-line briefs, and stray/misplaced comments.
+  const markdown = rawMarkdown
+    .replace(CHAPTER_BRIEF_GLOBAL, "")
+    .replace(BEAT_BRIEF_GLOBAL, "");
   let changed = markdown !== rawMarkdown;
 
   const parsed = parseBeatsGrouped(markdown);
