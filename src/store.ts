@@ -171,6 +171,7 @@ function buildSummaryComment(beat: BeatMeta): string | null {
 // ---------------------------------------------------------------------------
 
 const CHAPTER_BRIEF_REGEX = /^<!--\s*chapter-brief\s*\[([^\]]+)\]\s*(.*?)\s*-->$/;
+const CHAPTER_BRIEF_GLOBAL = /<!--\s*chapter-brief\s*\[[^\]]+\][\s\S]*?-->\n?/g;
 
 function buildChapterBriefComment(meta: ChapterMeta): string | null {
   if (!meta.summary) return null;
@@ -186,16 +187,16 @@ function buildChapterBriefComment(meta: ChapterMeta): string | null {
  * Only scans preamble lines — never looks past them.
  */
 function stripChapterBrief(preamble: string): { brief: string | null; preamble: string } {
-  const lines = preamble.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i]!.trim();
-    if (CHAPTER_BRIEF_REGEX.test(trimmed)) {
-      const brief = trimmed;
-      const remaining = [...lines.slice(0, i), ...lines.slice(i + 1)].join("\n");
-      return { brief, preamble: remaining };
-    }
-  }
-  return { brief: null, preamble };
+  // Handle both single-line and multi-line chapter-brief comments,
+  // including duplicates caused by the previous single-line-only matching bug.
+  const regex = /<!--\s*chapter-brief\s*\[[^\]]+\][\s\S]*?-->/g;
+  let brief: string | null = null;
+  const cleaned = preamble.replace(regex, (match) => {
+    if (!brief) brief = match;
+    return "";
+  });
+  if (!brief) return { brief: null, preamble };
+  return { brief, preamble: cleaned.replace(/\n{3,}/g, "\n\n") };
 }
 
 /**
@@ -1517,14 +1518,18 @@ export async function refreshSummaryComments(
 ): Promise<string | null> {
   const meta = await getChapterMeta(projectId, partId, chapterId);
   const mdPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.md`);
-  const markdown = await readMd(mdPath);
+  const rawMarkdown = await readMd(mdPath);
+
+  // Strip ALL chapter-brief comments from the entire file before parsing.
+  // This handles duplicates, multi-line briefs, and stray briefs in beat prose.
+  const markdown = rawMarkdown.replace(CHAPTER_BRIEF_GLOBAL, "");
+  let changed = markdown !== rawMarkdown;
+
   const parsed = parseBeatsGrouped(markdown);
 
-  let changed = false;
-
-  // Chapter-brief
+  // Chapter-brief — always regenerate from meta
   const newChapterBrief = buildChapterBriefComment(meta);
-  if (parsed.chapterBrief !== newChapterBrief) {
+  if (changed || parsed.chapterBrief !== newChapterBrief) {
     parsed.chapterBrief = newChapterBrief;
     changed = true;
   }

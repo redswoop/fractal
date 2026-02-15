@@ -1116,6 +1116,89 @@ else
 fi
 
 # =========================================================================
+# Test 46: multi-line summary doesn't duplicate chapter-brief (regression)
+# =========================================================================
+echo "--- Test 46: multi-line summary produces exactly one chapter-brief ---"
+mcp_call "create" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03","title":"The Return","summary":"Mid-October. The thermostat cranks up.\n\nTHE BOND: Second visit. Together again but the energy is completely different."}' > /dev/null
+
+T46_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-03.md').read()
+import re
+# Count chapter-brief comment blocks (single or multi-line)
+briefs = list(re.finditer(r'<!-- chapter-brief.*?-->', md, re.DOTALL))
+ok = len(briefs) == 1
+print('true' if ok else 'false|count=' + str(len(briefs)))
+")
+if [ "$(echo "$T46_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 46 "multi-line summary produces exactly one chapter-brief" "true"
+else
+  report 46 "multi-line summary produces exactly one chapter-brief" "false" "$(echo "$T46_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 47: repeated refresh doesn't duplicate chapter-brief
+# =========================================================================
+echo "--- Test 47: repeated refresh doesn't duplicate chapter-brief ---"
+mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03"}' > /dev/null
+mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03"}' > /dev/null
+mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03"}' > /dev/null
+
+T47_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-03.md').read()
+import re
+briefs = re.findall(r'chapter-brief', md)
+ok = len(briefs) == 1
+print('true' if ok else 'false|count=' + str(len(briefs)) + ' expected 1')
+")
+if [ "$(echo "$T47_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 47 "repeated refresh doesn't duplicate chapter-brief" "true"
+else
+  report 47 "repeated refresh doesn't duplicate chapter-brief" "false" "$(echo "$T47_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 48: existing multi-line chapter-brief gets cleaned up
+# =========================================================================
+echo "--- Test 48: existing multi-line chapter-brief gets cleaned up ---"
+# Simulate the bug: manually inject duplicate multi-line chapter-briefs
+python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-03.md').read()
+# Inject 3 extra multi-line chapter-briefs (simulating the old bug)
+extra = '''<!-- chapter-brief [PLANNING] Mid-October. The thermostat cranks up.
+
+THE BOND: Second visit. Together again. -->
+<!-- chapter-brief [PLANNING] Mid-October. The thermostat cranks up.
+
+THE BOND: Second visit. Together again. -->
+<!-- chapter-brief [PLANNING] Mid-October. The thermostat cranks up.
+
+THE BOND: Second visit. Together again. -->'''
+# Insert after heading
+lines = md.split('\n')
+for i, line in enumerate(lines):
+    if line.startswith('# '):
+        lines.insert(i+1, extra)
+        break
+open('$TEST_DIR/parts/part-01/chapter-03.md', 'w').write('\n'.join(lines))
+"
+
+# Now refresh should clean them all up and leave exactly one brief
+mcp_call "refresh_summaries" '{"project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-03"}' > /dev/null
+
+T48_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-03.md').read()
+import re
+briefs = list(re.finditer(r'<!--\s*chapter-brief\s*\[', md))
+ok = len(briefs) == 1
+print('true' if ok else 'false|count=' + str(len(briefs)))
+")
+if [ "$(echo "$T48_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 48 "existing multi-line chapter-brief gets cleaned up" "true"
+else
+  report 48 "existing multi-line chapter-brief gets cleaned up" "false" "$(echo "$T48_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
 # Cleanup
 # =========================================================================
 rm -f "${SCRIPT_DIR}/templates/_test-custom.json" 2>/dev/null
