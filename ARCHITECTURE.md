@@ -125,6 +125,60 @@ The closing `<!-- /chapter -->` is optional but useful for parsing.
 - **Ignorable** — delete every comment and you have a clean manuscript
 - **Not proprietary** — it's standard markdown/HTML
 
+## Inline Annotations
+
+Annotations are editorial markers embedded in prose files:
+
+```
+<!-- @dev(claude): Check pacing here -->
+```
+
+### Format
+
+```
+<!-- @TYPE(AUTHOR): MESSAGE -->
+```
+
+Types: `note` (general), `dev` (structural), `line` (prose craft), `continuity` (consistency), `query` (question), `flag` (no message).
+
+Author defaults to `claude` when created via the tool, `human` when hand-written.
+
+### Wrapping
+
+Long annotations are word-wrapped at ~80 columns for readability:
+
+```
+<!-- @dev(claude): This is a longer note about a pacing
+problem that wraps naturally at word boundaries so each
+line stays readable in a text editor -->
+```
+
+The parser handles both single-line and multi-line annotations transparently. Wrapping is output-only — the parser normalizes whitespace when reading.
+
+### Warnings
+
+When `get_context` returns notes, the response includes a `warnings` array. Warnings surface corrupt or unparseable annotation-like markup:
+
+```json
+{
+  "notes": [...],
+  "warnings": [
+    {
+      "line": 9,
+      "beat": "b01",
+      "content": "<!-- @dev: This comment has no closing tag",
+      "issue": "Annotation start without closing -->"
+    }
+  ]
+}
+```
+
+If warnings appear, the agent should fix the corrupt markup using `edit target=beat`.
+
+### IDs
+
+Annotation IDs are line-number-based: `part-01/chapter-03:b02:n47`. Since line numbers shift on edit, always re-read notes before removing them.
+
 ---
 
 ## The Meta Files

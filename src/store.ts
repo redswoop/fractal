@@ -111,8 +111,9 @@ async function writeMd(path: string, content: string): Promise<void> {
 const ANNOTATION_TYPES = ["note", "dev", "line", "continuity", "query", "flag"] as const;
 type AnnotationType = (typeof ANNOTATION_TYPES)[number];
 const ANNOTATION_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*?))?\s*-->$/;
+// Detects annotation opening that may not close on the same line
+const ANNOTATION_START_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*))?$/;
 const BEAT_MARKER_REGEX = /^<!--\s*beat:(\S+)\s*\|\s*(.+?)\s*-->/;
-const BEAT_BRIEF_REGEX = /^<!--\s*beat-brief:(\S+)\s*\[(PLANNED|WRITTEN|DIRTY(?::\s*[^\]]*)?|CONFLICT)\]\s*(.*?)\s*-->$/;
 const BEAT_BRIEF_GLOBAL = /<!--\s*beat-brief:\S+\s*\[[^\]]+\][\s\S]*?-->\n?/g;
 
 export interface ParsedAnnotation {
@@ -130,10 +131,18 @@ export interface AnnotationSummary {
   by_author: Record<string, number>;
 }
 
+export interface AnnotationWarning {
+  line: number;
+  beat: string;
+  content: string;
+  issue: string;
+}
+
 export interface GetAnnotationsResult {
   notes: ParsedAnnotation[];
   summary: AnnotationSummary;
   versions: Record<string, string>;
+  warnings: AnnotationWarning[];
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +180,6 @@ function buildSummaryComment(beat: BeatMeta): string | null {
 // Chapter-level summary comment helpers
 // ---------------------------------------------------------------------------
 
-const CHAPTER_BRIEF_REGEX = /^<!--\s*chapter-brief\s*\[([^\]]+)\]\s*(.*?)\s*-->$/;
 const CHAPTER_BRIEF_GLOBAL = /<!--\s*chapter-brief\s*\[[^\]]+\][\s\S]*?-->\n?/g;
 
 function buildChapterBriefComment(meta: ChapterMeta): string | null {
@@ -1142,14 +1150,16 @@ export async function getDirtyNodes(projectId: string): Promise<DirtyNode[]> {
 /**
  * Parse all inline annotations from a chapter's markdown.
  * Pure function — no I/O. Walks lines top-to-bottom tracking beat context.
+ * Returns { annotations, warnings } — warnings surface corrupt/unparseable markup.
  */
 export function parseAnnotations(
   markdown: string,
   partId: string,
   chapterId: string
-): ParsedAnnotation[] {
+): { annotations: ParsedAnnotation[]; warnings: AnnotationWarning[] } {
   const lines = markdown.split("\n");
   const annotations: ParsedAnnotation[] = [];
+  const warnings: AnnotationWarning[] = [];
   let currentBeat = "none";
 
   for (let i = 0; i < lines.length; i++) {
@@ -1162,34 +1172,73 @@ export function parseAnnotations(
       continue;
     }
 
-    // Check for annotation
-    const annoMatch = ANNOTATION_REGEX.exec(line);
-    if (!annoMatch) continue;
+    // Check for annotation — single-line first
+    let annoMatch = ANNOTATION_REGEX.exec(line);
+    let endLine = i; // last line consumed by this annotation
+
+    if (!annoMatch) {
+      // Multi-line annotation: starts with <!-- @type but --> is on a later line
+      const startMatch = ANNOTATION_START_REGEX.exec(line);
+      if (startMatch) {
+        // Scan forward for closing -->, but abort at structural boundaries
+        let joined = line;
+        let found = false;
+        for (let j = i + 1; j < lines.length; j++) {
+          const scanLine = lines[j]!.trim();
+          // Abort if we hit a structural marker or another annotation/comment start
+          if (BEAT_MARKER_REGEX.test(scanLine)) break;
+          if (scanLine === "<!-- /chapter -->") break;
+          if (ANNOTATION_START_REGEX.test(scanLine)) break;
+          if (ANNOTATION_REGEX.test(scanLine)) break;
+          joined += " " + scanLine;
+          if (scanLine.includes("-->")) {
+            endLine = j;
+            found = true;
+            break;
+          }
+        }
+        if (found) {
+          // Normalize whitespace and try to match as a single line
+          const normalized = joined.replace(/\s+/g, " ").trim();
+          annoMatch = ANNOTATION_REGEX.exec(normalized);
+        }
+        if (!annoMatch) {
+          // Annotation-like start that couldn't be parsed — warn
+          warnings.push({
+            line: i + 1,
+            beat: currentBeat,
+            content: line,
+            issue: found
+              ? "Annotation comment could not be parsed after joining lines"
+              : "Annotation start without closing -->",
+          });
+        }
+      }
+      if (!annoMatch) continue;
+    }
 
     const lineNumber = i + 1; // 1-based
     const type = annoMatch[1]! as AnnotationType;
     const author = annoMatch[2] ?? "human";
-    const message = annoMatch[3] ?? null;
+    const message = annoMatch[3]?.replace(/\s*\n\s*/g, " ").trim() ?? null;
 
-    // Context: scan for nearest non-empty, non-annotation, non-marker prose line
+    // Context: scan for nearest non-empty, non-comment, non-marker prose line
     let before: string | null = null;
     for (let b = i - 1; b >= 0; b--) {
       const bLine = lines[b]!.trim();
       if (!bLine) continue;
-      if (ANNOTATION_REGEX.test(bLine)) continue;
+      if (bLine.startsWith("<!--")) continue; // skip any HTML comment (annotations, briefs, etc.)
       if (BEAT_MARKER_REGEX.test(bLine)) break;
-      if (bLine === "<!-- /chapter -->") break;
       before = bLine;
       break;
     }
 
     let after: string | null = null;
-    for (let a = i + 1; a < lines.length; a++) {
+    for (let a = endLine + 1; a < lines.length; a++) {
       const aLine = lines[a]!.trim();
       if (!aLine) continue;
-      if (ANNOTATION_REGEX.test(aLine)) continue;
+      if (aLine.startsWith("<!--")) continue; // skip any HTML comment
       if (BEAT_MARKER_REGEX.test(aLine)) break;
-      if (aLine === "<!-- /chapter -->") break;
       after = aLine;
       break;
     }
@@ -1202,9 +1251,12 @@ export function parseAnnotations(
       location: { part: partId, chapter: chapterId, beat: currentBeat, line_number: lineNumber },
       context: { before, after },
     });
+
+    // Skip past any extra lines consumed by a multi-line annotation
+    if (endLine > i) i = endLine;
   }
 
-  return annotations;
+  return { annotations, warnings };
 }
 
 /**
@@ -1241,7 +1293,7 @@ function parseNoteId(noteId: string): {
 }
 
 /**
- * Build an annotation HTML comment string.
+ * Build an annotation HTML comment string, word-wrapped at ~80 columns.
  */
 function buildAnnotationComment(
   type: AnnotationType,
@@ -1252,7 +1304,29 @@ function buildAnnotationComment(
   if (type === "flag") {
     return authorPart ? `<!-- @flag${authorPart} -->` : `<!-- @flag -->`;
   }
-  return `<!-- @${type}${authorPart}: ${message} -->`;
+  // Normalize whitespace — collapse any newlines/runs into single spaces
+  const safeMessage = message?.replace(/\s+/g, " ").trim() ?? null;
+  const singleLine = `<!-- @${type}${authorPart}: ${safeMessage} -->`;
+  if (singleLine.length <= 80) return singleLine;
+
+  // Word-wrap: first line has the prefix, continuation lines are plain text
+  const prefix = `<!-- @${type}${authorPart}: `;
+  const suffix = " -->";
+  const words = (safeMessage ?? "").split(" ");
+  const lines: string[] = [];
+  let current = prefix;
+
+  for (const word of words) {
+    const candidate = current + (current === prefix ? "" : " ") + word;
+    if (candidate.length > 80 && current !== prefix) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  lines.push(current + suffix);
+  return lines.join("\n");
 }
 
 /**
@@ -1317,14 +1391,16 @@ export async function getAnnotations(
   }
 
   let allNotes: ParsedAnnotation[] = [];
+  const allWarnings: AnnotationWarning[] = [];
   const versions: Record<string, string> = {};
 
   for (const { partId, chapterId } of chaptersToScan) {
     try {
       const mdPath = join(root, "parts", partId, `${chapterId}.md`);
       const markdown = await readMd(mdPath);
-      const notes = parseAnnotations(markdown, partId, chapterId);
-      allNotes.push(...notes);
+      const { annotations, warnings } = parseAnnotations(markdown, partId, chapterId);
+      allNotes.push(...annotations);
+      allWarnings.push(...warnings);
 
       const relPath = join("parts", partId, `${chapterId}.md`);
       const { getFileVersion } = await import("./git.js");
@@ -1357,6 +1433,7 @@ export async function getAnnotations(
     notes: allNotes,
     summary: { total: allNotes.length, by_type, by_author },
     versions,
+    warnings: allWarnings,
   };
 }
 
@@ -1463,7 +1540,9 @@ export async function removeAnnotationLines(
     const markdown = await readMd(mdPath);
     const lines = markdown.split("\n");
 
-    // Verify each target line is actually an annotation
+    // Verify each target line is actually an annotation and collect all lines to remove
+    // (multi-line annotations may span multiple lines)
+    const toRemove = new Set<number>();
     for (const ln of lineNumbers) {
       if (ln < 1 || ln > lines.length) {
         throw new Error(
@@ -1471,7 +1550,20 @@ export async function removeAnnotationLines(
         );
       }
       const content = lines[ln - 1]!.trim();
-      if (!ANNOTATION_REGEX.test(content)) {
+      if (ANNOTATION_REGEX.test(content)) {
+        // Single-line annotation
+        toRemove.add(ln);
+      } else if (ANNOTATION_START_REGEX.test(content)) {
+        // Multi-line annotation: scan forward for closing -->, stop at structural boundaries
+        toRemove.add(ln);
+        for (let j = ln; j < lines.length; j++) {
+          const scanLine = lines[j]!.trim();
+          if (BEAT_MARKER_REGEX.test(scanLine)) break;
+          if (scanLine === "<!-- /chapter -->") break;
+          toRemove.add(j + 1);
+          if (scanLine.includes("-->")) break;
+        }
+      } else {
         throw new Error(
           `Line ${ln} is not an annotation: '${content}'. Notes may have shifted — re-read with get_notes.`
         );
@@ -1479,7 +1571,6 @@ export async function removeAnnotationLines(
     }
 
     // Filter out annotation lines
-    const toRemove = new Set(lineNumbers);
     const filtered = lines.filter((_, i) => !toRemove.has(i + 1));
     await writeMd(mdPath, filtered.join("\n"));
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fractal MCP feature test suite
-# Runs 43+ tests against the Fractal MCP server on localhost:3001
+# Runs 51 tests against the Fractal MCP server on localhost:3001
 # Tests the 12 consolidated tools (down from 28)
 
 set -euo pipefail
@@ -1196,6 +1196,104 @@ if [ "$(echo "$T48_PASS" | cut -d'|' -f1)" = "true" ]; then
   report 48 "existing multi-line chapter-brief gets cleaned up" "true"
 else
   report 48 "existing multi-line chapter-brief gets cleaned up" "false" "$(echo "$T48_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 49: annotation with newlines in message → single-line on disk
+# =========================================================================
+echo "--- Test 49: annotation with newlines → collapsed to single line ---"
+# Write some prose first so we have a valid line to annotate
+mcp_call "write" '{"target":"beat","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","beat_id":"b01","content":"The morning sun hit the cobblestones.\n\nUnit 7 walked through the gate."}' > /dev/null
+
+RESULT=$(mcp_call "create" '{"target":"note","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-02","line_number":5,"note_type":"dev","message":"This needs work.\nThe pacing is off.\nConsider cutting."}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 49 "annotation with newlines" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T49_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+import re
+# Find the annotation line
+annos = [l for l in md.split('\n') if '<!-- @dev' in l and 'pacing' in l]
+if not annos:
+    print('false|no annotation with pacing found')
+else:
+    # Should be single line (contains both <!-- and -->)
+    single = annos[0].strip().startswith('<!--') and annos[0].strip().endswith('-->')
+    no_newlines = '\n' not in annos[0]
+    ok = single and no_newlines
+    print('true' if ok else 'false|single=' + str(single) + ' line=' + repr(annos[0][:200]))
+")
+  if [ "$(echo "$T49_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 49 "annotation with newlines collapsed to single line on disk" "true"
+  else
+    report 49 "annotation with newlines collapsed to single line on disk" "false" "$(echo "$T49_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+# =========================================================================
+# Test 50: multi-line annotation on disk is parsed and visible
+# =========================================================================
+echo "--- Test 50: multi-line annotation on disk is parsed ---"
+# Manually inject a multi-line annotation into the prose file
+python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+lines = md.split('\n')
+# Insert a multi-line annotation after line 5
+multi = '<!-- @note(claude): This is a multi-line\nannotation that spans\nmultiple lines -->'
+lines.insert(5, multi)
+open('$TEST_DIR/parts/part-01/chapter-02.md', 'w').write('\n'.join(lines))
+"
+
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"notes":{"scope":"part-01/chapter-02"}}}')
+TEXT=$(extract_text "$RESULT")
+T50_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+notes = d.get('notes', {}).get('notes', [])
+# Find the multi-line annotation
+found = [n for n in notes if n.get('message') and 'multi-line' in n['message'] and 'multiple lines' in n['message']]
+ok = len(found) == 1 and found[0].get('author') == 'claude'
+print('true' if ok else 'false|found=' + str(len(found)) + ' notes=' + str([n.get('message','')[:50] for n in notes]))
+" <<< "$TEXT")
+if [ "$(echo "$T50_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 50 "multi-line annotation on disk is parsed correctly" "true"
+else
+  report 50 "multi-line annotation on disk is parsed correctly" "false" "$(echo "$T50_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Test 51: multi-line annotation can be removed
+# =========================================================================
+echo "--- Test 51: multi-line annotation can be removed ---"
+# Get the note ID from the previous test
+NOTE_ID=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+notes = d.get('notes', {}).get('notes', [])
+found = [n for n in notes if n.get('message') and 'multi-line' in n['message']]
+print(found[0]['id'] if found else '')
+" <<< "$TEXT")
+
+if [ -z "$NOTE_ID" ]; then
+  report 51 "multi-line annotation removal" "false" "No multi-line note ID found"
+else
+  RESULT=$(mcp_call "remove" "{\"target\":\"notes\",\"project\":\"_fractal-test\",\"note_ids\":[\"$NOTE_ID\"]}")
+  ERR=$(is_error "$RESULT")
+  if [ "$ERR" = "true" ]; then
+    report 51 "multi-line annotation removal" "false" "Tool error: $(extract_text "$RESULT")"
+  else
+    T51_PASS=$(python3 -c "
+md = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+no_multi = 'multi-line' not in md and 'multiple lines' not in md
+print('true' if no_multi else 'false|multi-line annotation still in file')
+")
+    if [ "$(echo "$T51_PASS" | cut -d'|' -f1)" = "true" ]; then
+      report 51 "multi-line annotation removed from disk" "true"
+    else
+      report 51 "multi-line annotation removed from disk" "false" "$(echo "$T51_PASS" | cut -d'|' -f2-)"
+    fi
+  fi
 fi
 
 # =========================================================================

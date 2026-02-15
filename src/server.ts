@@ -286,6 +286,12 @@ async function createMcpServer(): Promise<McpServer> {
     "Fetch specific sections on demand via # notation (e.g. 'emmy#voice-personality'). " +
     "This keeps context lean — load only the sections you need for the current scene.",
     "",
+    "Annotations: Inline notes in prose files (<!-- @type(author): message -->). " +
+    "Long annotations are word-wrapped at ~80 columns for human readability — the parser handles multi-line comments transparently. " +
+    "When get_context returns notes, check the 'warnings' array: it surfaces corrupt markup " +
+    "(e.g. unclosed annotation comments, unparseable syntax) with line number, beat, and issue description. " +
+    "If warnings appear, fix the markup in the prose file — the agent can use edit target=beat to repair it.",
+    "",
     "Current projects:",
     projectLines,
   ].join("\n");
