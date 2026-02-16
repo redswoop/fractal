@@ -304,7 +304,8 @@ async function createMcpServer(): Promise<McpServer> {
     "Summaries (in .md files as <!-- summary: ... --> comments) are scannable navigation (1-3 sentences, what happens + who's involved, never 'why'). " +
     "Notes (in separate .notes.md files) are dense planning workspace (500+ words typical) with psychology, themes, foreshadowing, research, uncommitted details. " +
     "Part notes (part-XX.notes.md) provide context for the whole part. Chapter notes (chapter-XX.notes.md) are chapter-specific. " +
-    "Notes use flexible markdown organization with proper headers (# Timeline, # Beat b01, # Parking Lot, etc.). " +
+    "Notes use # (h1) headers for sections and support lazy-loading like canon: " +
+    "get_context returns topMatter + sections TOC; fetch specific sections via # notation (e.g. 'part-01#thematic-architecture'). " +
     "When writing prose, consult part_notes + chapter_notes via get_context first. When planning, write notes via write tool with target='part_notes' or 'chapter_notes'.",
     "",
     "Canon loading: Canon entries use ## sections for organization. " +
@@ -493,8 +494,8 @@ async function createMcpServer(): Promise<McpServer> {
         }).optional().describe("Include inline annotations. Pass {} for all, or add scope/type/author filters."),
         scratch_index: z.boolean().optional().describe("Include the scratch folder index (scratch.json)"),
         canon_list: z.union([z.boolean(), z.string()]).optional().describe("true = list canon types; string = list entries within that type, e.g. 'characters'"),
-        part_notes: z.array(z.string()).optional().describe("Part-level planning notes, e.g. ['part-01']. Returns markdown content from part-XX.notes.md. Always relevant when working in this part — contains big-picture thinking, thematic intentions, arc considerations. Empty string if file doesn't exist."),
-        chapter_notes: z.array(z.string()).optional().describe("Chapter-level planning notes, e.g. ['part-01/chapter-03']. Returns markdown content from chapter-XX.notes.md. Contains detailed planning (500+ words typical), psychology, themes, uncommitted details, research. Organized with flexible markdown headers. Empty string if file doesn't exist."),
+        part_notes: z.array(z.string()).optional().describe("Part-level planning notes, e.g. ['part-01']. Returns structured object with topMatter + sections TOC when # sections exist. Use # notation for specific sections: 'part-01#thematic-architecture'. Returns raw string if no sections. Empty string if file doesn't exist."),
+        chapter_notes: z.array(z.string()).optional().describe("Chapter-level planning notes, e.g. ['part-01/chapter-03']. Returns structured object with topMatter + sections TOC when # sections exist. Use # notation for specific sections: 'part-01/chapter-03#beat-b01'. Returns raw string if no sections. Empty string if file doesn't exist."),
         search: z.object({
           query: z.string().describe("Search query (case-insensitive)"),
           scope: z.enum(["prose", "canon", "scratch"]).optional().describe("Limit search to a specific scope"),

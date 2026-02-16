@@ -1383,7 +1383,7 @@ else:
   fi
 fi
 
-echo "--- Test 54: get_context includes part_notes and chapter_notes ---"
+echo "--- Test 54: get_context lazy-loads notes with sections TOC ---"
 RESULT=$(mcp_call "get_context" "{\"project\":\"_fractal-test\",\"include\":{\"part_notes\":[\"part-01\"],\"chapter_notes\":[\"part-01/chapter-01\"]}}")
 ERR=$(is_error "$RESULT")
 if [ "$ERR" = "true" ]; then
@@ -1393,19 +1393,26 @@ else
 import json, sys
 text = sys.stdin.read()
 d = json.loads(text)
-part_notes = d.get('part_notes', {}).get('part-01', '')
-chapter_notes = d.get('chapter_notes', {}).get('part-01/chapter-01', '')
-has_part = 'part-level planning' in part_notes
-has_chapter = 'Dense planning' in chapter_notes
-if has_part and has_chapter:
-    print('true')
+pn = d.get('part_notes', {}).get('part-01', '')
+cn = d.get('chapter_notes', {}).get('part-01/chapter-01', '')
+# Both should be structured objects with sections
+if not isinstance(pn, dict) or 'sections' not in pn:
+    print('false|part_notes should be structured with sections, got: ' + str(type(pn).__name__))
+elif not isinstance(cn, dict) or 'sections' not in cn:
+    print('false|chapter_notes should be structured with sections, got: ' + str(type(cn).__name__))
+elif not any(s['id'] == 'part-notes' for s in pn['sections']):
+    print('false|expected part-notes section in part_notes')
+elif not any(s['id'] == 'chapter-notes-opening' for s in cn['sections']):
+    print('false|expected chapter-notes-opening section in chapter_notes')
+elif '_hint' not in pn or '_hint' not in cn:
+    print('false|missing _hint in structured notes')
 else:
-    print('false|missing content in notes')
+    print('true')
 " <<< "$(extract_text "$RESULT")")
   if [ "$(echo "$T54_PASS" | cut -d'|' -f1)" = "true" ]; then
-    report 54 "get_context returns part_notes and chapter_notes content" "true"
+    report 54 "get_context lazy-loads notes with sections TOC" "true"
   else
-    report 54 "get_context with notes" "false" "$(echo "$T54_PASS" | cut -d'|' -f2-)"
+    report 54 "get_context notes lazy-load" "false" "$(echo "$T54_PASS" | cut -d'|' -f2-)"
   fi
 fi
 
@@ -1433,6 +1440,34 @@ else:
     report 55 "missing notes files return empty string" "true"
   else
     report 55 "missing notes files graceful handling" "false" "$(echo "$T55_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 56: fetch specific note section via # notation ---"
+RESULT=$(mcp_call "get_context" "{\"project\":\"_fractal-test\",\"include\":{\"part_notes\":[\"part-01#part-notes\"],\"chapter_notes\":[\"part-01/chapter-01#chapter-notes-opening\"]}}")
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 56 "fetch note section via # notation" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T56_PASS=$(python3 -c "
+import json, sys
+text = sys.stdin.read()
+d = json.loads(text)
+pn = d.get('part_notes', {}).get('part-01#part-notes', {})
+cn = d.get('chapter_notes', {}).get('part-01/chapter-01#chapter-notes-opening', {})
+pn_content = pn.get('content', '') if isinstance(pn, dict) else ''
+cn_content = cn.get('content', '') if isinstance(cn, dict) else ''
+has_part = 'part-level planning' in pn_content
+has_chapter = 'Dense planning' in cn_content
+if has_part and has_chapter:
+    print('true')
+else:
+    print('false|section content missing expected text. part=' + repr(pn_content[:80]) + ' chapter=' + repr(cn_content[:80]))
+" <<< "$(extract_text "$RESULT")")
+  if [ "$(echo "$T56_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 56 "fetch specific note section via # notation" "true"
+  else
+    report 56 "fetch note section via #" "false" "$(echo "$T56_PASS" | cut -d'|' -f2-)"
   fi
 fi
 

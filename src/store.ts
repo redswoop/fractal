@@ -1059,6 +1059,45 @@ export async function getChapterNotes(projectId: string, partId: string, chapter
 }
 
 /**
+ * Resolve a single h1 section from part-level notes by slug.
+ */
+export async function getPartNoteSection(
+  projectId: string,
+  partId: string,
+  sectionId: string
+): Promise<string> {
+  const raw = await getPartNotes(projectId, partId);
+  if (!raw) throw new Error(`No part notes found for ${partId}`);
+  const parsed = splitMarkdownSections(raw, 1);
+  const section = parsed.sections.find(s => s.id === sectionId);
+  if (!section) {
+    const available = parsed.sections.map(s => s.id).join(", ");
+    throw new Error(`Section '${sectionId}' not found in ${partId} notes. Available: ${available || "(none)"}`);
+  }
+  return section.content;
+}
+
+/**
+ * Resolve a single h1 section from chapter-level notes by slug.
+ */
+export async function getChapterNoteSection(
+  projectId: string,
+  partId: string,
+  chapterId: string,
+  sectionId: string
+): Promise<string> {
+  const raw = await getChapterNotes(projectId, partId, chapterId);
+  if (!raw) throw new Error(`No chapter notes found for ${partId}/${chapterId}`);
+  const parsed = splitMarkdownSections(raw, 1);
+  const section = parsed.sections.find(s => s.id === sectionId);
+  if (!section) {
+    const available = parsed.sections.map(s => s.id).join(", ");
+    throw new Error(`Section '${sectionId}' not found in ${chapterId} notes. Available: ${available || "(none)"}`);
+  }
+  return section.content;
+}
+
+/**
  * Write part-level notes to part-XX.notes.md.
  * Creates file if it doesn't exist.
  */
@@ -1204,7 +1243,7 @@ export function slugify(heading: string): string {
     .replace(/^-|-$/g, "");
 }
 
-export function splitMarkdownSections(markdown: string): ParsedCanon {
+export function splitMarkdownSections(markdown: string, headerLevel: number = 2): ParsedCanon {
   const lines = markdown.split("\n");
   let topMatter = "";
   const sections: CanonSection[] = [];
@@ -1213,8 +1252,11 @@ export function splitMarkdownSections(markdown: string): ParsedCanon {
   // Track slug counts for deduplication
   const slugCounts = new Map<string, number>();
 
+  const headerPrefix = "#".repeat(headerLevel);
+  const headerRegex = new RegExp(`^${headerPrefix} (.+)$`);
+
   for (const line of lines) {
-    const match = line.match(/^## (.+)$/);
+    const match = line.match(headerRegex);
     if (match) {
       if (currentSection) {
         currentSection.content = currentSection.content.trimEnd();
@@ -2594,17 +2636,74 @@ export async function getContext(
     }
   }
 
-  // Part notes — planning workspace at part level
+  // Part notes — planning workspace at part level; supports # for section-level lazy loading
   if (include.part_notes?.length) {
-    await fetchAll(include.part_notes, (partId) => getPartNotes(projectId, partId), "part_notes");
+    const partNotes: Record<string, unknown> = {};
+    await Promise.all(include.part_notes.map(async (ref) => {
+      try {
+        const hashIdx = ref.indexOf("#");
+        if (hashIdx !== -1) {
+          const partId = ref.slice(0, hashIdx);
+          const sectionId = ref.slice(hashIdx + 1);
+          partNotes[ref] = { content: await getPartNoteSection(projectId, partId, sectionId) };
+          return;
+        }
+        const raw = await getPartNotes(projectId, ref);
+        if (!raw) {
+          partNotes[ref] = "";
+          return;
+        }
+        const parsed = splitMarkdownSections(raw, 1);
+        if (parsed.sections.length > 0) {
+          partNotes[ref] = {
+            topMatter: parsed.topMatter,
+            sections: parsed.sections.map(s => ({ name: s.name, id: s.id, fetch: `${ref}#${s.id}` })),
+            _hint: `Only top-matter is shown. To fetch a section, include '${ref}#<section-id>' in the part_notes array.`,
+          };
+        } else {
+          partNotes[ref] = raw;
+        }
+      } catch (err) {
+        errors[`part_notes:${ref}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(partNotes).length > 0) response.part_notes = partNotes;
   }
 
-  // Chapter notes — planning workspace at chapter level
+  // Chapter notes — planning workspace at chapter level; supports # for section-level lazy loading
   if (include.chapter_notes?.length) {
-    await fetchAll(include.chapter_notes, async (ref) => {
-      const { partId, chapterId } = parseChapterRef(ref);
-      return getChapterNotes(projectId, partId, chapterId);
-    }, "chapter_notes");
+    const chapterNotes: Record<string, unknown> = {};
+    await Promise.all(include.chapter_notes.map(async (ref) => {
+      try {
+        const hashIdx = ref.indexOf("#");
+        if (hashIdx !== -1) {
+          const chapterRef = ref.slice(0, hashIdx);
+          const sectionId = ref.slice(hashIdx + 1);
+          const { partId, chapterId } = parseChapterRef(chapterRef);
+          chapterNotes[ref] = { content: await getChapterNoteSection(projectId, partId, chapterId, sectionId) };
+          return;
+        }
+        const { partId, chapterId } = parseChapterRef(ref);
+        const raw = await getChapterNotes(projectId, partId, chapterId);
+        if (!raw) {
+          chapterNotes[ref] = "";
+          return;
+        }
+        const parsed = splitMarkdownSections(raw, 1);
+        if (parsed.sections.length > 0) {
+          chapterNotes[ref] = {
+            topMatter: parsed.topMatter,
+            sections: parsed.sections.map(s => ({ name: s.name, id: s.id, fetch: `${ref}#${s.id}` })),
+            _hint: `Only top-matter is shown. To fetch a section, include '${ref}#<section-id>' in the chapter_notes array.`,
+          };
+        } else {
+          chapterNotes[ref] = raw;
+        }
+      } catch (err) {
+        errors[`chapter_notes:${ref}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(chapterNotes).length > 0) response.chapter_notes = chapterNotes;
   }
 
   if (Object.keys(errors).length > 0) {
