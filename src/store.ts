@@ -1041,7 +1041,7 @@ export async function getBeatProse(
  * Returns empty string if file doesn't exist (graceful degradation).
  */
 export async function getPartNotes(projectId: string, partId: string): Promise<string> {
-  const notesPath = join(projectRoot(projectId), "parts", `${partId}.notes.md`);
+  const notesPath = join(projectRoot(projectId), "parts", partId, `${partId}.notes.md`);
   if (!existsSync(notesPath)) return "";
   return readMd(notesPath);
 }
@@ -1061,7 +1061,7 @@ export async function getChapterNotes(projectId: string, partId: string, chapter
  * Creates file if it doesn't exist.
  */
 export async function writePartNotes(projectId: string, partId: string, content: string): Promise<WriteResult> {
-  const notesPath = join(projectRoot(projectId), "parts", `${partId}.notes.md`);
+  const notesPath = join(projectRoot(projectId), "parts", partId, `${partId}.notes.md`);
   await writeMd(notesPath, content);
   return {
     path: notesPath,

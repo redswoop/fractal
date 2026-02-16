@@ -1334,7 +1334,7 @@ if [ "$ERR" = "true" ]; then
 else
   T52_PASS=$(python3 -c "
 import os
-path = '$TEST_DIR/parts/part-01.notes.md'
+path = '$TEST_DIR/parts/part-01/part-01.notes.md'
 if not os.path.exists(path):
     print('false|file not created')
 else:

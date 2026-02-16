@@ -26,8 +26,8 @@ rust-and-flour/
 ├── project.json                    ← the root. title, logline, status.
 │
 ├── parts/
-│   ├── part-01.notes.md            ← part-level planning notes (optional)
 │   ├── part-01/
+│   │   ├── part-01.notes.md        ← part-level planning notes (optional)
 │   │   ├── part.json               ← part title, summary, arc description, status
 │   │   ├── chapter-01.md           ← the prose (with beat markers)
 │   │   ├── chapter-01.notes.md     ← chapter planning notes (optional)
@@ -241,7 +241,7 @@ everyone was too aroused to read.
 
 ### Part-Level vs Chapter-Level Notes
 
-**Part notes** (`part-01.notes.md`):
+**Part notes** (`part-01/part-01.notes.md`):
 - Big-picture context for the entire part
 - Thematic intentions and arc considerations
 - Always relevant when working on any chapter in this part
@@ -301,7 +301,7 @@ write({
 
 Notes files are **carried along automatically**:
 - Moving a chapter moves `.md`, `.notes.md`, and `.meta.json` together
-- Reordering a part moves `part-XX.notes.md` with the folder
+- Reordering a part moves the entire folder (including `part-XX.notes.md`)
 - File relationships preserved
 
 ### Annotations in Notes
