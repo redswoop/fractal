@@ -707,6 +707,7 @@ export interface ProjectData {
   themes: string[];
   parts: string[];
   canon_types?: CanonTypeDefinition[];
+  autoCommit?: boolean;
 }
 
 export async function listProjects(): Promise<{ id: string; title: string; status: string }[]> {
@@ -759,6 +760,7 @@ export async function ensureProjectStructure(
       themes: template?.themes ?? [],
       parts: [],
       canon_types: canonTypes,
+      autoCommit: false,
     };
     await writeJson(projectJsonPath, projectData);
   }

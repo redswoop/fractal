@@ -30,7 +30,7 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 
 import * as store from "./store.js";
-import { ensureGitRepo, autoCommit, sessionCommit, lastSessionSummary } from "./git.js";
+import { ensureGitRepo, autoCommit, sessionCommit, lastSessionSummary, getUncommittedFiles } from "./git.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -176,7 +176,25 @@ function jsonResult(data: unknown) {
   return textResult(JSON.stringify(data, null, 2));
 }
 
+async function shouldAutoCommit(root: string): Promise<boolean> {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const projectJson = await readFile(join(root, "project.json"), "utf-8");
+    const project = JSON.parse(projectJson) as { autoCommit?: boolean };
+    // Default to true if not set (backward compatibility with existing projects)
+    return project.autoCommit ?? true;
+  } catch {
+    // If can't read project.json, default to true for safety
+    return true;
+  }
+}
+
 async function commitFiles(root: string, paths: string[], message: string): Promise<void> {
+  if (!(await shouldAutoCommit(root))) {
+    return; // Skip commit if autoCommit is disabled
+  }
+
   const files = paths.map((p) => p.startsWith(root) ? p.slice(root.length + 1) : p);
   try {
     await autoCommit(root, files, message);
@@ -300,6 +318,13 @@ async function createMcpServer(): Promise<McpServer> {
     "(e.g. unclosed annotation comments, unparseable syntax) with line number, beat, and issue description. " +
     "If warnings appear, fix the markup in the prose file — the agent can use edit target=beat to repair it.",
     "",
+    "Git commits: New projects default to autoCommit=false (session-based commits). " +
+    "When you see uncommitted_count in list_projects or get_context, inform the user about pending changes. " +
+    "If you just made those changes in this conversation, continue working. " +
+    "If it's a new conversation or you didn't make them, ask: 'There are uncommitted changes. Want to commit them first, or continue?' " +
+    "Use session_summary to commit accumulated changes with a meaningful message describing the work done. " +
+    "Projects with autoCommit=true commit automatically (legacy behavior).",
+    "",
     "Current projects:",
     projectLines,
   ].join("\n");
@@ -315,7 +340,7 @@ async function createMcpServer(): Promise<McpServer> {
 
   server.registerTool("list_projects", {
     title: "List Projects",
-    description: "List all available projects with status briefing. In-progress projects include dirty node count, open note count, and last session summary.",
+    description: "List all available projects with status briefing. Includes uncommitted file count for all projects. In-progress projects also include dirty node count, open note count, and last session summary.",
     inputSchema: {},
   }, async () => {
     const projects = await store.listProjects();
@@ -324,22 +349,34 @@ async function createMcpServer(): Promise<McpServer> {
     }
 
     const enriched = await Promise.all(projects.map(async (p) => {
-      if (p.status !== "in-progress") return p;
+      const extra: { dirty_nodes?: number; open_notes?: number; last_session?: string; uncommitted_files?: string[]; uncommitted_count?: number } = {};
 
-      const extra: { dirty_nodes?: number; open_notes?: number; last_session?: string } = {};
-      try {
-        const dirty = await store.getDirtyNodes(p.id);
-        if (dirty.length > 0) extra.dirty_nodes = dirty.length;
-      } catch { /* skip */ }
-      try {
-        const notes = await store.getAnnotations(p.id);
-        if (notes.notes.length > 0) extra.open_notes = notes.notes.length;
-      } catch { /* skip */ }
+      // Always check for uncommitted files
       try {
         const root = store.projectRoot(p.id);
-        const session = await lastSessionSummary(root);
-        if (session) extra.last_session = session;
+        const uncommittedFiles = await getUncommittedFiles(root);
+        if (uncommittedFiles.length > 0) {
+          extra.uncommitted_files = uncommittedFiles;
+          extra.uncommitted_count = uncommittedFiles.length;
+        }
       } catch { /* skip */ }
+
+      // Only enrich in-progress projects with other details
+      if (p.status === "in-progress") {
+        try {
+          const dirty = await store.getDirtyNodes(p.id);
+          if (dirty.length > 0) extra.dirty_nodes = dirty.length;
+        } catch { /* skip */ }
+        try {
+          const notes = await store.getAnnotations(p.id);
+          if (notes.notes.length > 0) extra.open_notes = notes.notes.length;
+        } catch { /* skip */ }
+        try {
+          const root = store.projectRoot(p.id);
+          const session = await lastSessionSummary(root);
+          if (session) extra.last_session = session;
+        } catch { /* skip */ }
+      }
 
       return { ...p, ...extra };
     }));
@@ -447,7 +484,7 @@ async function createMcpServer(): Promise<McpServer> {
         beats: z.array(z.string()).optional().describe("Beat refs, e.g. ['part-01/chapter-03:b01']"),
         beat_variants: z.array(z.string()).optional().describe("Beat refs for variant listing, e.g. ['part-01/chapter-03:b03']"),
         dirty_nodes: z.boolean().optional().describe("Include all dirty/conflict nodes"),
-        project_meta: z.boolean().optional().describe("Include top-level project metadata (enriched with canon_types_active and has_guide)"),
+        project_meta: z.boolean().optional().describe("Include top-level project metadata (enriched with canon_types_active, has_guide, uncommitted_files, and uncommitted_count)"),
         guide: z.boolean().optional().describe("Include GUIDE.md content from project root"),
         notes: z.object({
           scope: z.string().optional().describe("Scope filter: 'part-01', 'part-01/chapter-03', or 'part-01/chapter-03:b02'. Omit to scan entire project."),
@@ -468,6 +505,18 @@ async function createMcpServer(): Promise<McpServer> {
     // Separate search from store-native includes
     const { search: searchOpts, ...storeInclude } = include;
     const data = await store.getContext(project, storeInclude) as Record<string, unknown>;
+
+    // Enrich project_meta with uncommitted files if requested
+    if (include.project_meta && data.project_meta) {
+      try {
+        const root = store.projectRoot(project);
+        const uncommittedFiles = await getUncommittedFiles(root);
+        (data.project_meta as Record<string, unknown>).uncommitted_files = uncommittedFiles;
+        (data.project_meta as Record<string, unknown>).uncommitted_count = uncommittedFiles.length;
+      } catch {
+        // Skip if git check fails
+      }
+    }
 
     // Handle search if requested
     if (searchOpts) {

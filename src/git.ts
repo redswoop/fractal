@@ -205,3 +205,29 @@ export async function sessionCommit(root: string, message: string): Promise<stri
   await git(root, "commit", "-m", `[session] ${message}`);
   return git(root, "rev-parse", "--short", "HEAD");
 }
+
+/**
+ * Get list of uncommitted files (both modified and untracked).
+ * Returns relative paths from the project root.
+ */
+export async function getUncommittedFiles(root: string): Promise<string[]> {
+  try {
+    // Get modified/deleted files
+    const modified = await git(root, "diff", "--name-only");
+    // Get staged files
+    const staged = await git(root, "diff", "--cached", "--name-only");
+    // Get untracked files
+    const untracked = await git(root, "ls-files", "--others", "--exclude-standard");
+
+    const files = new Set<string>();
+    for (const line of [...modified.split("\n"), ...staged.split("\n"), ...untracked.split("\n")]) {
+      const trimmed = line.trim();
+      if (trimmed) files.add(trimmed);
+    }
+
+    return Array.from(files).sort();
+  } catch {
+    // If not a git repo or git fails, return empty array
+    return [];
+  }
+}

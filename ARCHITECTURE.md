@@ -627,17 +627,31 @@ When a scratch file finds its home, we move it (or absorb it into a chapter) and
 
 ## Versioning: Git Under the Hood
 
-The entire project directory is a git repository. The tool commits automatically with meaningful messages:
+The entire project directory is a git repository. New projects default to **session-based commits** to keep git history clean and meaningful.
 
-```
-[auto] Updated chapter-01 beats b01-b02 prose
-[auto] Canon update: marguerite.md — changed backstory to going blind
-[auto] Marked chapter-01 beats b02-b03 dirty (upstream: marguerite canon change)
-[auto] Promoted scratch/unit7-dream-sequence.md → part-02/chapter-01:b01
-[session] Session with Claude — restructured Part 2 arc
-```
+### Commit Modes
 
-The `[auto]` commits happen per-operation. The `[session]` commits are summaries I write at natural breakpoints — "here's what we did in this working session."
+Projects have an `autoCommit` field in `project.json` (default: `false` for new projects):
+
+**When `autoCommit: false` (recommended):**
+- Individual operations (create, write, edit, etc.) do NOT commit
+- Changes accumulate in git working tree
+- Use `session_summary` tool to commit all changes with a meaningful message
+- Results in clean git history: `[session] Created opening scene with hero waking up`
+
+**When `autoCommit: true` (legacy/opt-in):**
+- Every operation commits immediately
+- Results in verbose history:
+  ```
+  [auto] Updated chapter-01 beats b01-b02 prose
+  [auto] Canon update: marguerite.md — changed backstory
+  [auto] Marked chapter-01 beats b02-b03 dirty
+  ```
+
+**Uncommitted changes visibility:**
+- `list_projects` shows `uncommitted_files` and `uncommitted_count` for all projects
+- `get_context` with `project_meta` includes uncommitted status
+- Agents can see pending changes and prompt: "Want to commit these first, or continue?"
 
 ### What this gives you
 
@@ -723,7 +737,9 @@ Returns any combination of project data in one call via the `include` object:
 ### `refresh_summaries` — Migrate to markdown-first format
 - `refresh_summaries(project, part_id, chapter_id)` → migrate legacy chapter from full-fat sidecar to markdown-first format (injects summaries/labels/status into .md, slims sidecar to navigation index). Idempotent — no-op if already migrated.
 
-### Every write operation triggers a git commit.
+### Git Commit Behavior
+- **New projects** (`autoCommit: false`): Changes accumulate, commit via `session_summary`
+- **Legacy projects** or opt-in (`autoCommit: true`): Every write operation commits immediately
 
 ---
 
