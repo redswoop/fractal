@@ -1033,6 +1033,61 @@ export async function getBeatProse(
 }
 
 // ---------------------------------------------------------------------------
+// Notes files — planning workspace separate from scannable summaries
+// ---------------------------------------------------------------------------
+
+/**
+ * Read part-level notes from part-XX.notes.md (if it exists).
+ * Returns empty string if file doesn't exist (graceful degradation).
+ */
+export async function getPartNotes(projectId: string, partId: string): Promise<string> {
+  const notesPath = join(projectRoot(projectId), "parts", `${partId}.notes.md`);
+  if (!existsSync(notesPath)) return "";
+  return readMd(notesPath);
+}
+
+/**
+ * Read chapter-level notes from chapter-XX.notes.md (if it exists).
+ * Returns empty string if file doesn't exist (graceful degradation).
+ */
+export async function getChapterNotes(projectId: string, partId: string, chapterId: string): Promise<string> {
+  const notesPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.notes.md`);
+  if (!existsSync(notesPath)) return "";
+  return readMd(notesPath);
+}
+
+/**
+ * Write part-level notes to part-XX.notes.md.
+ * Creates file if it doesn't exist.
+ */
+export async function writePartNotes(projectId: string, partId: string, content: string): Promise<WriteResult> {
+  const notesPath = join(projectRoot(projectId), "parts", `${partId}.notes.md`);
+  await writeMd(notesPath, content);
+  return {
+    path: notesPath,
+    description: `Updated part notes: ${partId}`,
+  };
+}
+
+/**
+ * Write chapter-level notes to chapter-XX.notes.md.
+ * Creates file if it doesn't exist.
+ */
+export async function writeChapterNotes(
+  projectId: string,
+  partId: string,
+  chapterId: string,
+  content: string
+): Promise<WriteResult> {
+  const notesPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.notes.md`);
+  await writeMd(notesPath, content);
+  return {
+    path: notesPath,
+    description: `Updated chapter notes: ${partId}/${chapterId}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Canon path resolution — shared by getCanon, editCanon, updateCanon, etc.
 // ---------------------------------------------------------------------------
 
@@ -2351,6 +2406,8 @@ export interface ContextInclude {
   notes?: { scope?: string; type?: string; author?: string };
   scratch_index?: boolean;
   canon_list?: string | boolean;
+  part_notes?: string[];
+  chapter_notes?: string[];
 }
 
 export async function getContext(
@@ -2533,6 +2590,19 @@ export async function getContext(
     } catch (err) {
       errors["canon_list"] = err instanceof Error ? err.message : String(err);
     }
+  }
+
+  // Part notes — planning workspace at part level
+  if (include.part_notes?.length) {
+    await fetchAll(include.part_notes, (partId) => getPartNotes(projectId, partId), "part_notes");
+  }
+
+  // Chapter notes — planning workspace at chapter level
+  if (include.chapter_notes?.length) {
+    await fetchAll(include.chapter_notes, async (ref) => {
+      const { partId, chapterId } = parseChapterRef(ref);
+      return getChapterNotes(projectId, partId, chapterId);
+    }, "chapter_notes");
   }
 
   if (Object.keys(errors).length > 0) {

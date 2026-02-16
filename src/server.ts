@@ -282,6 +282,13 @@ async function createMcpServer(): Promise<McpServer> {
     "Never put writing-relevant content only in meta. " +
     "Rule of thumb: if a human writing a scene would need it, it goes in the markdown. If only the tool needs it for queries, it goes in meta.",
     "",
+    "Summary vs Notes distinction: " +
+    "Summaries (in .md files as <!-- summary: ... --> comments) are scannable navigation (1-3 sentences, what happens + who's involved, never 'why'). " +
+    "Notes (in separate .notes.md files) are dense planning workspace (500+ words typical) with psychology, themes, foreshadowing, research, uncommitted details. " +
+    "Part notes (part-XX.notes.md) provide context for the whole part. Chapter notes (chapter-XX.notes.md) are chapter-specific. " +
+    "Notes use flexible markdown organization with proper headers (# Timeline, # Beat b01, # Parking Lot, etc.). " +
+    "When writing prose, consult part_notes + chapter_notes via get_context first. When planning, write notes via write tool with target='part_notes' or 'chapter_notes'.",
+    "",
     "Canon loading: Canon entries use ## sections for organization. " +
     "When sections exist, get_context returns only the top-matter (summary) plus a sections TOC. " +
     "Fetch specific sections on demand via # notation (e.g. 'emmy#voice-personality'). " +
@@ -449,6 +456,8 @@ async function createMcpServer(): Promise<McpServer> {
         }).optional().describe("Include inline annotations. Pass {} for all, or add scope/type/author filters."),
         scratch_index: z.boolean().optional().describe("Include the scratch folder index (scratch.json)"),
         canon_list: z.union([z.boolean(), z.string()]).optional().describe("true = list canon types; string = list entries within that type, e.g. 'characters'"),
+        part_notes: z.array(z.string()).optional().describe("Part-level planning notes, e.g. ['part-01']. Returns markdown content from part-XX.notes.md. Always relevant when working in this part — contains big-picture thinking, thematic intentions, arc considerations. Empty string if file doesn't exist."),
+        chapter_notes: z.array(z.string()).optional().describe("Chapter-level planning notes, e.g. ['part-01/chapter-03']. Returns markdown content from chapter-XX.notes.md. Contains detailed planning (500+ words typical), psychology, themes, uncommitted details, research. Organized with flexible markdown headers. Empty string if file doesn't exist."),
         search: z.object({
           query: z.string().describe("Search query (case-insensitive)"),
           scope: z.enum(["prose", "canon", "scratch"]).optional().describe("Limit search to a specific scope"),
@@ -503,7 +512,7 @@ async function createMcpServer(): Promise<McpServer> {
       beat: z.object({
         id: z.string().describe("Beat identifier, e.g. 'b01'"),
         label: z.string().describe("Short label, e.g. 'Unit 7 opens the bakery'"),
-        summary: z.string().describe("What happens in this beat"),
+        summary: z.string().describe("Scannable description (1-3 sentences). What happens and who's involved. Never explain 'why' — that goes in notes. For written beats: describe the prose. For planned beats: expand the label into sentences."),
         status: z.string().optional().describe("Default: 'planned'. Values: 'planned', 'written', 'dirty', 'conflict'"),
         dirty_reason: z.string().nullable().optional().describe("Reason if dirty. Usually null for new beats."),
         characters: z.array(z.string()).optional().describe("Character IDs, e.g. ['unit-7', 'marguerite']"),
@@ -750,13 +759,16 @@ async function createMcpServer(): Promise<McpServer> {
     title: "Write",
     description:
       "Write or replace content. target='beat' writes prose to a beat (or promotes scratch into it via source_scratch). " +
-      "target='canon' creates or rewrites a canon entry. Use ## sections to organize — agents lazy-load via # notation.",
+      "target='canon' creates or rewrites a canon entry. Use ## sections to organize — agents lazy-load via # notation. " +
+      "target='part_notes' writes part-level planning notes (big-picture context, always relevant to all chapters in this part). " +
+      "target='chapter_notes' writes chapter-specific planning notes (detailed planning, psychology, themes, research). " +
+      "Notes use flexible markdown organization with proper headers — organize however makes sense for your thinking.",
     inputSchema: {
-      target: z.enum(["beat", "canon"]).describe("What to write"),
+      target: z.enum(["beat", "canon", "part_notes", "chapter_notes"]).describe("What to write"),
       project: projectParam,
       content: z.string().optional().describe("The content to write. Required unless source_scratch is provided (beat only)."),
-      part_id: z.string().optional().describe("Part identifier (beat only)"),
-      chapter_id: z.string().optional().describe("Chapter identifier (beat only)"),
+      part_id: z.string().optional().describe("Part identifier (beat, part_notes, chapter_notes)"),
+      chapter_id: z.string().optional().describe("Chapter identifier (beat, chapter_notes)"),
       beat_id: z.string().optional().describe("Beat identifier (beat only)"),
       append: z.boolean().optional().describe("If true, append as a new variant block after existing one(s) (beat only)"),
       source_scratch: z.string().optional().describe("Scratch filename to promote into this beat instead of providing content (beat only)"),
@@ -809,6 +821,28 @@ async function createMcpServer(): Promise<McpServer> {
             `Canon update: ${args.type}/${args.id}`
           );
           return jsonResult(results);
+        }
+        case "part_notes": {
+          requireArgs(args, ["part_id"], "target='part_notes'");
+          if (args.content === undefined) throw new Error("content is required for target='part_notes'");
+          const root = store.projectRoot(project);
+          const result = await withCommit(
+            root,
+            () => store.writePartNotes(project, args.part_id!, args.content!),
+            `Updated part notes: ${args.part_id}`
+          );
+          return jsonResult(result);
+        }
+        case "chapter_notes": {
+          requireArgs(args, ["part_id", "chapter_id"], "target='chapter_notes'");
+          if (args.content === undefined) throw new Error("content is required for target='chapter_notes'");
+          const root = store.projectRoot(project);
+          const result = await withCommit(
+            root,
+            () => store.writeChapterNotes(project, args.part_id!, args.chapter_id!, args.content!),
+            `Updated chapter notes: ${args.part_id}/${args.chapter_id}`
+          );
+          return jsonResult(result);
         }
       }
     } catch (err) {

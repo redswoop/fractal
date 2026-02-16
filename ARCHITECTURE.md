@@ -26,11 +26,14 @@ rust-and-flour/
 ├── project.json                    ← the root. title, logline, status.
 │
 ├── parts/
+│   ├── part-01.notes.md            ← part-level planning notes (optional)
 │   ├── part-01/
 │   │   ├── part.json               ← part title, summary, arc description, status
 │   │   ├── chapter-01.md           ← the prose (with beat markers)
+│   │   ├── chapter-01.notes.md     ← chapter planning notes (optional)
 │   │   ├── chapter-01.meta.json    ← slim navigation index (characters, dirty_reason, pov, location)
 │   │   ├── chapter-02.md
+│   │   ├── chapter-02.notes.md     ← (optional)
 │   │   ├── chapter-02.meta.json
 │   │   └── ...
 │   ├── part-02/
@@ -145,6 +148,172 @@ The closing `<!-- /chapter -->` is optional but useful for parsing.
 - **Parseable** by the tool with a trivial regex
 - **Ignorable** — delete every comment and you have a clean manuscript
 - **Not proprietary** — it's standard markdown/HTML
+
+---
+
+## Summary vs Notes: Separation of Concerns
+
+**The problem:** Beat summaries were serving two conflicting purposes:
+1. **Navigation** — understanding what happens when scanning/reordering beats
+2. **Planning workspace** — dense ideation notes with psychology, themes, foreshadowing (500-700+ words)
+
+This created bloat: scanning beats across chapters meant loading thousands of words of planning notes you didn't need.
+
+**The solution:** Separate files with distinct purposes.
+
+### Summaries (in .md files)
+
+Summaries remain as `<!-- summary: ... -->` comments in chapter markdown files. They are **scannable navigation** (1-3 sentences):
+
+```markdown
+<!-- beat:b05 [planned] | Vertical Club / Beekman Tower -->
+<!-- summary: Emmy's first class at Vertical Club with Lexi. Locker
+room education watching Lexi's containment ritual. Drinks at Beekman
+Tower, New Year's invite. Outside, Emmy's nipples react to cold with
+unusual intensity. Lexi notices unconsciously. -->
+```
+
+**Summary guidelines:**
+- **Function over length:** Scannable in seconds, never explain "why" (that's for notes)
+- **For written beats:** 1-3 sentences describing what happens (naturally ~25-65 words)
+- **For planned beats:** Label expanded into sentences — what needs to happen, who's involved
+- **Never:** Psychology, thematic analysis, foreshadowing, motivation beneath surface
+
+### Notes (in .notes.md files)
+
+Notes live in separate `.notes.md` files alongside chapter markdown:
+
+```
+parts/part-01/
+  chapter-01.md           # Prose + markers + lightweight summaries
+  chapter-01.notes.md     # Dense planning notes (optional)
+  chapter-01.meta.json    # Navigation sidecar
+```
+
+Notes are **dense planning workspace** (500+ words typical) with:
+- Psychology and character motivation
+- Thematic analysis and symbolic purpose
+- Foreshadowing and Chekhov's guns
+- Research notes and timeline constraints
+- Why this beat matters beneath the surface action
+
+### Notes File Format
+
+**Flexible markdown organization** — not prescribed structure:
+
+```markdown
+# Chapter Notes: The Audience
+
+In this part, we basically break Emmy. Everything that happens serves
+to push her inevitably towards the Bond.
+
+# Growth Timeline
+
+- Mid-December: First dose from Mira
+- Dec 25: Already outgrown Christmas gift (DD → E/F)
+- End of chapter: Pushing F
+
+# Thematic Concerns
+
+The golden period. Everything the dose touches turns golden. This is the trap.
+
+## Beat b05 — Vertical Club / Beekman Tower
+
+Mid-December. Emmy's first class at the Vertical Club on East 61st. Lexi's
+domain — the dancer reinvented as trainer...
+
+[Full 700-word planning analysis]
+
+Thematic purpose: This beat plants Chekhov's nipples — the first symptom
+everyone was too aroused to read.
+
+# Parking Lot
+
+- Need to place Marcus's "Where do you go?" line
+- Research: Beekman Tower bar name in 1996?
+```
+
+**Key properties:**
+- Proper markdown headers (`#`, `##`) for structure
+- No prescribed organization — use what makes sense
+- Beat sections optional, can mix with thematic/research sections
+- Same file format for part-level and chapter-level notes
+
+### Part-Level vs Chapter-Level Notes
+
+**Part notes** (`part-01.notes.md`):
+- Big-picture context for the entire part
+- Thematic intentions and arc considerations
+- Always relevant when working on any chapter in this part
+
+**Chapter notes** (`chapter-01.notes.md`):
+- Chapter-specific planning and detail
+- Dense psychology, uncommitted details, research
+- Specific to that chapter only
+
+### Scoped Hierarchy
+
+Notes are **properly scoped**:
+- Part notes provide context for all chapters in the part
+- Chapter notes are specific to that chapter
+- When writing beat b05, consult: part notes + chapter notes + beat prose
+
+### API Access
+
+**Reading notes via get_context:**
+```javascript
+get_context({
+  project: "velvet-bond",
+  include: {
+    part_notes: ["part-01"],              // Context for whole part
+    chapter_notes: ["part-01/chapter-03"], // Chapter-specific thinking
+    beats: ["part-01/chapter-03:b05"]     // The prose
+  }
+})
+```
+
+**Writing notes via write:**
+```javascript
+write({
+  target: "part_notes",
+  project: "velvet-bond",
+  part_id: "part-01",
+  content: "# Part Notes\n\nIn this part, we break Emmy..."
+})
+
+write({
+  target: "chapter_notes",
+  project: "velvet-bond",
+  part_id: "part-01",
+  chapter_id: "chapter-03",
+  content: "# Chapter Notes\n\n# Growth Timeline\n\n..."
+})
+```
+
+### Graceful Degradation
+
+- Notes files are **optional** — not all chapters need them
+- Missing `.notes.md` files return empty string (no errors)
+- Projects without notes work unchanged
+- Beats can add notes incrementally
+
+### File Operations
+
+Notes files are **carried along automatically**:
+- Moving a chapter moves `.md`, `.notes.md`, and `.meta.json` together
+- Reordering a part moves `part-XX.notes.md` with the folder
+- File relationships preserved
+
+### Annotations in Notes
+
+Annotations work in `.notes.md` files using the same syntax as prose files:
+```markdown
+<!-- @dev(claude): Remember to check if this foreshadowing pays off in Part 3 -->
+```
+
+The annotation tools (`update_annotations`, etc.) accept `.notes.md` file paths.
+
+---
 
 ## Inline Annotations
 

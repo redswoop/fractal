@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fractal MCP feature test suite
-# Runs 51 tests against the Fractal MCP server on localhost:3001
+# Runs 55 tests against the Fractal MCP server on localhost:3001
 # Tests the 12 consolidated tools (down from 28)
 
 set -euo pipefail
@@ -1319,6 +1319,120 @@ print('true' if no_multi else 'false|multi-line annotation still in file')
     else
       report 51 "multi-line annotation removed from disk" "false" "$(echo "$T51_PASS" | cut -d'|' -f2-)"
     fi
+  fi
+fi
+
+# =========================================================================
+# Notes Files (.notes.md) Tests
+# =========================================================================
+
+echo "--- Test 52: write part_notes creates part-01.notes.md ---"
+RESULT=$(mcp_call "write" "{\"target\":\"part_notes\",\"project\":\"_fractal-test\",\"part_id\":\"part-01\",\"content\":\"# Part Notes\\n\\nThis is part-level planning context.\\n\\n## Theme\\n\\nExploration of connection.\\n\"}")
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 52 "write part_notes" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T52_PASS=$(python3 -c "
+import os
+path = '$TEST_DIR/parts/part-01.notes.md'
+if not os.path.exists(path):
+    print('false|file not created')
+else:
+    content = open(path).read()
+    has_header = '# Part Notes' in content
+    has_theme = '## Theme' in content
+    has_text = 'part-level planning' in content
+    if has_header and has_theme and has_text:
+        print('true')
+    else:
+        print('false|content missing expected text')
+")
+  if [ "$(echo "$T52_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 52 "write part_notes creates file with content" "true"
+  else
+    report 52 "write part_notes" "false" "$(echo "$T52_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 53: write chapter_notes creates chapter-01.notes.md ---"
+RESULT=$(mcp_call "write" "{\"target\":\"chapter_notes\",\"project\":\"_fractal-test\",\"part_id\":\"part-01\",\"chapter_id\":\"chapter-01\",\"content\":\"# Chapter Notes: Opening\\n\\n## Beat b01\\n\\nDense planning for this beat. Psychology, themes, foreshadowing.\\n\\n## Parking Lot\\n\\n- Research needed\\n\"}")
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 53 "write chapter_notes" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T53_PASS=$(python3 -c "
+import os
+path = '$TEST_DIR/parts/part-01/chapter-01.notes.md'
+if not os.path.exists(path):
+    print('false|file not created')
+else:
+    content = open(path).read()
+    has_header = '# Chapter Notes: Opening' in content
+    has_beat = '## Beat b01' in content
+    has_planning = 'Dense planning' in content
+    has_parking = '## Parking Lot' in content
+    if has_header and has_beat and has_planning and has_parking:
+        print('true')
+    else:
+        print('false|content missing expected text')
+")
+  if [ "$(echo "$T53_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 53 "write chapter_notes creates file with content" "true"
+  else
+    report 53 "write chapter_notes" "false" "$(echo "$T53_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 54: get_context includes part_notes and chapter_notes ---"
+RESULT=$(mcp_call "get_context" "{\"project\":\"_fractal-test\",\"include\":{\"part_notes\":[\"part-01\"],\"chapter_notes\":[\"part-01/chapter-01\"]}}")
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 54 "get_context with part_notes and chapter_notes" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T54_PASS=$(python3 -c "
+import json, sys
+text = sys.stdin.read()
+d = json.loads(text)
+part_notes = d.get('part_notes', {}).get('part-01', '')
+chapter_notes = d.get('chapter_notes', {}).get('part-01/chapter-01', '')
+has_part = 'part-level planning' in part_notes
+has_chapter = 'Dense planning' in chapter_notes
+if has_part and has_chapter:
+    print('true')
+else:
+    print('false|missing content in notes')
+" <<< "$(extract_text "$RESULT")")
+  if [ "$(echo "$T54_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 54 "get_context returns part_notes and chapter_notes content" "true"
+  else
+    report 54 "get_context with notes" "false" "$(echo "$T54_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 55: missing notes files return empty string gracefully ---"
+RESULT=$(mcp_call "get_context" "{\"project\":\"_fractal-test\",\"include\":{\"part_notes\":[\"part-02\"],\"chapter_notes\":[\"part-01/chapter-02\"]}}")
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 55 "missing notes files graceful handling" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T55_PASS=$(python3 -c "
+import json, sys
+text = sys.stdin.read()
+d = json.loads(text)
+# part-02 notes don't exist, should return empty string
+part_notes = d.get('part_notes', {}).get('part-02', None)
+# chapter-02 notes don't exist, should return empty string
+chapter_notes = d.get('chapter_notes', {}).get('part-01/chapter-02', None)
+# Empty string is the graceful fallback
+if part_notes == '' and chapter_notes == '':
+    print('true')
+else:
+    print('false|expected empty strings for missing files')
+" <<< "$(extract_text "$RESULT")")
+  if [ "$(echo "$T55_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 55 "missing notes files return empty string" "true"
+  else
+    report 55 "missing notes files graceful handling" "false" "$(echo "$T55_PASS" | cut -d'|' -f2-)"
   fi
 fi
 
