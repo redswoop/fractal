@@ -13,10 +13,11 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import type { FastifyRequest, FastifyReply } from "fastify";
@@ -35,6 +36,9 @@ import { ensureGitRepo, autoCommit, sessionCommit, lastSessionSummary, getUncomm
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PKG_VERSION = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8")).version as string;
 
 const PORT = parseInt(process.env["PORT"] ?? "3001", 10);
 const SESSION_TTL_MS = parseInt(process.env["SESSION_TTL_MS"] ?? String(30 * 60 * 1000), 10);
@@ -1226,6 +1230,7 @@ app.get("/health", async () => {
   const mem = process.memoryUsage();
   return {
     status: "ok",
+    version: PKG_VERSION,
     sessions: {
       active: sessions.size,
       ttl_ms: SESSION_TTL_MS,
