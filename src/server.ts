@@ -335,7 +335,7 @@ async function createMcpServer(): Promise<McpServer> {
   ].join("\n");
 
   const server = new McpServer(
-    { name: "fractal", version: "1.1.0" },
+    { name: "fractal", version: PKG_VERSION },
     { instructions },
   );
 
