@@ -11,7 +11,7 @@ If this tool vanishes tomorrow, you're left with **a folder of markdown files or
 Chapters are single markdown files. Not split into one-file-per-beat. Here's why:
 
 - Without the tool, you can open `chapter-01.md` and **read the whole chapter**. It's just prose.
-- Beats are marked with **HTML comments** inside the markdown. Any renderer ignores them. Any editor shows them as faint gray lines. They're structural annotations, not file boundaries.
+- Beats are marked with **HTML comments** inside the markdown. Any renderer ignores them. Any editor shows them as faint gray lines. They're structural markers, not file boundaries.
 - This means the story is always readable as a plain manuscript — top to bottom, chapter by chapter. The fractal structure is overlaid, not imposed.
 
 If a chapter gets monstrously long, nothing stops you from splitting it. But the default is: one chapter, one file, readable.
@@ -304,20 +304,20 @@ Notes files are **carried along automatically**:
 - Reordering a part moves the entire folder (including `part-XX.notes.md`)
 - File relationships preserved
 
-### Annotations in Notes
+### Redlines in Notes
 
-Annotations work in `.notes.md` files using the same syntax as prose files:
+Redlines work in `.notes.md` files using the same syntax as prose files:
 ```markdown
 <!-- @dev(claude): Remember to check if this foreshadowing pays off in Part 3 -->
 ```
 
-The annotation tools (`update_annotations`, etc.) accept `.notes.md` file paths.
+The redline tools (`create target=redline`, `remove target=redlines`, etc.) accept `.notes.md` file paths.
 
 ---
 
-## Inline Annotations
+## Inline Redlines
 
-Annotations are editorial markers embedded in prose files:
+Redlines are editorial markers embedded in prose files:
 
 ```
 <!-- @dev(claude): Check pacing here -->
@@ -335,7 +335,7 @@ Author defaults to `claude` when created via the tool, `human` when hand-written
 
 ### Wrapping
 
-Long annotations are word-wrapped at ~80 columns for readability:
+Long redlines are word-wrapped at ~80 columns for readability:
 
 ```
 <!-- @dev(claude): This is a longer note about a pacing
@@ -343,11 +343,11 @@ problem that wraps naturally at word boundaries so each
 line stays readable in a text editor -->
 ```
 
-The parser handles both single-line and multi-line annotations transparently. Wrapping is output-only — the parser normalizes whitespace when reading.
+The parser handles both single-line and multi-line redlines transparently. Wrapping is output-only — the parser normalizes whitespace when reading.
 
 ### Warnings
 
-When `get_context` returns notes, the response includes a `warnings` array. Warnings surface corrupt or unparseable annotation-like markup:
+When `get_context` returns redlines, the response includes a `warnings` array. Warnings surface corrupt or unparseable redline-like markup:
 
 ```json
 {
@@ -357,7 +357,7 @@ When `get_context` returns notes, the response includes a `warnings` array. Warn
       "line": 9,
       "beat": "b01",
       "content": "<!-- @dev: This comment has no closing tag",
-      "issue": "Annotation start without closing -->"
+      "issue": "Redline start without closing -->"
     }
   ]
 }
@@ -367,7 +367,7 @@ If warnings appear, the agent should fix the corrupt markup using `edit target=b
 
 ### IDs
 
-Annotation IDs are line-number-based: `part-01/chapter-03:b02:n47`. Since line numbers shift on edit, always re-read notes before removing them.
+Redline IDs are line-number-based: `part-01/chapter-03:b02:n47`. Since line numbers shift on edit, always re-read redlines before removing them.
 
 ---
 
@@ -673,7 +673,7 @@ Projects have an `autoCommit` field in `project.json` (default: `false` for new 
 The MCP server exposes **12 consolidated tools**. Six verb-based tools (`create`, `update`, `write`, `edit`, `remove`, `template`) use a discriminator parameter (`target` or `action`) to dispatch to the right operation. This keeps the API small while covering all object types uniformly.
 
 ### `list_projects` — Entry point
-- `list_projects()` → list all projects with status briefing (dirty nodes, open notes, last session)
+- `list_projects()` → list all projects with status briefing (dirty nodes, open redlines, last session)
 
 ### `template` — Template management (action discriminator)
 - `template(action="list")` → list available project templates
@@ -693,7 +693,7 @@ Returns any combination of project data in one call via the `include` object:
 - `scratch` — scratch file content by filename
 - `scratch_index` — scratch folder index
 - `dirty_nodes` — all nodes flagged dirty/conflict
-- `notes` — inline annotations with scope/type/author filters
+- `redlines` — inline redlines with scope/type/author filters
 - `canon_list` — list canon types (boolean) or entries within a type (string)
 - `guide` — GUIDE.md content
 - `search` — `{query, scope?}` full-text search across prose, canon, scratch (replaces the old standalone `search` tool)
@@ -704,7 +704,7 @@ Returns any combination of project data in one call via the `include` object:
 - `create(target="chapter", project, part_id, chapter_id, title, ...)` → create a new chapter (prose .md + .meta.json)
 - `create(target="beat", project, part_id, chapter_id, beat, after_beat_id?)` → add a new beat to the structure
 - `create(target="scratch", project, filename, content, note, ...)` → toss something in the scratch folder
-- `create(target="note", project, part_id, chapter_id, line_number, note_type, message?)` → insert inline annotation
+- `create(target="redline", project, part_id, chapter_id, line_number, redline_type, message?)` → insert inline redline
 
 ### `update` — Update metadata (target discriminator)
 - `update(target="project", project, patch)` → update top-level metadata
@@ -723,7 +723,7 @@ Returns any combination of project data in one call via the `include` object:
 
 ### `remove` — Delete objects (target discriminator)
 - `remove(target="beat", project, part_id, chapter_id, beat_id)` → remove a beat (prose moves to scratch)
-- `remove(target="notes", project, note_ids)` → batch-remove annotations by ID
+- `remove(target="redlines", project, redline_ids)` → batch-remove redlines by ID
 
 ### `select_variant` — Pick a beat variant
 - `select_variant(project, part_id, chapter_id, beat_id, keep_index)` → keep one variant, archive rest to scratch

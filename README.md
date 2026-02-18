@@ -21,7 +21,7 @@ Fractal manages **projects** — each one a novel, novella, or other long-form w
 - **Templates** — genre presets that configure which canon types a project starts with (fiction, worldbuilding, LitRPG, fanfic), or start with the default and add types as you go
 - **Scratch** — loose scenes, dialogue riffs, ideas without a home yet
 - **Dirty tracking** — when canon changes, downstream beats get flagged for review
-- **Inline annotations** — notes, queries, continuity flags embedded in prose
+- **Inline redlines** — notes, queries, continuity flags embedded in prose
 - **Git versioning** — every write auto-commits with a meaningful message
 
 There are 12 consolidated tools covering reads, writes, search, structure manipulation, and session management.
@@ -144,12 +144,12 @@ Later, when you're writing Part 2:
 
 > **Claude:** *adds a new beat b03 between b01 and b02, promotes the scratch content into it*
 
-### Annotations — leaving notes in the prose
+### Redlines — leaving notes in the prose
 
 > **You:** Can you flag every place where Unit 7 says something that could be read as emotional? I want to track whether I'm making her too human too fast.
 >
 > **Claude:** *searches prose for Unit 7's dialogue and internal observations*
-> *adds @continuity annotations at each location*
+> *adds @continuity redlines at each location*
 >
 > Found 5 moments across 4 chapters:
 > - Chapter 1, b02: "I would like to come in" — `@continuity: emotional marker 1/5, "would like" implies desire`
@@ -160,7 +160,7 @@ Later, when you're writing Part 2:
 >
 > The progression looks intentional — she goes from polite phrasing (1) to desire (2) to frustration (3) to projection (4) to defiance (5). That arc works. If anything, the jump between 3 and 4 could use one more beat.
 
-Annotations are HTML comments in the prose — invisible in any markdown reader, visible in the editor, scannable by the tool.
+Redlines are HTML comments in the prose — invisible in any markdown reader, visible in the editor, scannable by the tool.
 
 ### Picking between variants
 
@@ -312,13 +312,13 @@ The API is 12 consolidated tools. Six verb-based tools (`create`, `update`, `wri
 
 | Tool | Targets / Actions | Description |
 |------|-------------------|-------------|
-| `list_projects` | — | List all projects with status briefing (dirty nodes, open notes, last session) |
-| `get_context` | — | Primary read tool — returns any combination of project data in one call. Supports: project_meta, parts, chapter_meta, chapter_prose, beats, beat_variants, canon (with `#section` notation), scratch, scratch_index, dirty_nodes, notes, canon_list, guide, search |
-| `create` | project, part, chapter, beat, scratch, note | Create new entities across the project hierarchy |
+| `list_projects` | — | List all projects with status briefing (dirty nodes, open redlines, last session) |
+| `get_context` | — | Primary read tool — returns any combination of project data in one call. Supports: project_meta, parts, chapter_meta, chapter_prose, beats, beat_variants, canon (with `#section` notation), scratch, scratch_index, dirty_nodes, redlines, canon_list, guide, search |
+| `create` | project, part, chapter, beat, scratch, redline | Create new entities across the project hierarchy |
 | `update` | project, part, chapter, node | Update metadata; mark nodes dirty/clean with reasons |
 | `write` | beat, canon | Write/replace content — beat prose, canon entries, or promote scratch into beats |
 | `edit` | beat, canon | Surgical find/replace with atomic ordered edits |
-| `remove` | beat, notes | Remove beats (prose archived to scratch) or resolve annotations |
+| `remove` | beat, redlines | Remove beats (prose archived to scratch) or resolve redlines |
 | `template` | list, get, save, apply | Manage project templates (fiction, worldbuilding, LitRPG, fanfic) |
 | `select_variant` | — | Choose one variant of a beat, archive the rest to scratch |
 | `reorder_beats` | — | Reorder beats within a chapter (meta and prose updated together) |

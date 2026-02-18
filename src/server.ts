@@ -271,8 +271,8 @@ async function createMcpServer(): Promise<McpServer> {
           if (dirty.length > 0) details.push(`${dirty.length} dirty node${dirty.length > 1 ? "s" : ""}`);
         } catch { /* skip */ }
         try {
-          const notes = await store.getAnnotations(p.id);
-          if (notes.notes.length > 0) details.push(`${notes.notes.length} open note${notes.notes.length > 1 ? "s" : ""}`);
+          const rl = await store.getRedlines(p.id);
+          if (rl.redlines.length > 0) details.push(`${rl.redlines.length} open redline${rl.redlines.length > 1 ? "s" : ""}`);
         } catch { /* skip */ }
         try {
           const root = store.projectRoot(p.id);
@@ -317,10 +317,10 @@ async function createMcpServer(): Promise<McpServer> {
     "Fetch specific sections on demand via # notation (e.g. 'emmy#voice-personality'). " +
     "This keeps context lean — load only the sections you need for the current scene.",
     "",
-    "Annotations: Inline notes in prose files (<!-- @type(author): message -->). " +
-    "Long annotations are word-wrapped at ~80 columns for human readability — the parser handles multi-line comments transparently. " +
-    "When get_context returns notes, check the 'warnings' array: it surfaces corrupt markup " +
-    "(e.g. unclosed annotation comments, unparseable syntax) with line number, beat, and issue description. " +
+    "Redlines: Inline editorial marks in prose files (<!-- @type(author): message -->). " +
+    "Long redlines are word-wrapped at ~80 columns for human readability — the parser handles multi-line comments transparently. " +
+    "When get_context returns redlines, check the 'warnings' array: it surfaces corrupt markup " +
+    "(e.g. unclosed redline comments, unparseable syntax) with line number, beat, and issue description. " +
     "If warnings appear, fix the markup in the prose file — the agent can use edit target=beat to repair it.",
     "",
     "Git commits: New projects default to autoCommit=false (session-based commits). " +
@@ -345,7 +345,7 @@ async function createMcpServer(): Promise<McpServer> {
 
   server.registerTool("list_projects", {
     title: "List Projects",
-    description: "List all available projects with status briefing. Includes uncommitted file count for all projects. In-progress projects also include dirty node count, open note count, and last session summary.",
+    description: "List all available projects with status briefing. Includes uncommitted file count for all projects. In-progress projects also include dirty node count, open redline count, and last session summary.",
     inputSchema: {},
   }, async () => {
     const projects = await store.listProjects();
@@ -354,7 +354,7 @@ async function createMcpServer(): Promise<McpServer> {
     }
 
     const enriched = await Promise.all(projects.map(async (p) => {
-      const extra: { dirty_nodes?: number; open_notes?: number; last_session?: string; uncommitted_files?: string[]; uncommitted_count?: number } = {};
+      const extra: { dirty_nodes?: number; open_redlines?: number; last_session?: string; uncommitted_files?: string[]; uncommitted_count?: number } = {};
 
       // Always check for uncommitted files
       try {
@@ -373,8 +373,8 @@ async function createMcpServer(): Promise<McpServer> {
           if (dirty.length > 0) extra.dirty_nodes = dirty.length;
         } catch { /* skip */ }
         try {
-          const notes = await store.getAnnotations(p.id);
-          if (notes.notes.length > 0) extra.open_notes = notes.notes.length;
+          const rl = await store.getRedlines(p.id);
+          if (rl.redlines.length > 0) extra.open_redlines = rl.redlines.length;
         } catch { /* skip */ }
         try {
           const root = store.projectRoot(p.id);
@@ -491,11 +491,11 @@ async function createMcpServer(): Promise<McpServer> {
         dirty_nodes: z.boolean().optional().describe("Include all dirty/conflict nodes"),
         project_meta: z.boolean().optional().describe("Include top-level project metadata (enriched with canon_types_active, has_guide, uncommitted_files, and uncommitted_count)"),
         guide: z.boolean().optional().describe("Include GUIDE.md content from project root"),
-        notes: z.object({
+        redlines: z.object({
           scope: z.string().optional().describe("Scope filter: 'part-01', 'part-01/chapter-03', or 'part-01/chapter-03:b02'. Omit to scan entire project."),
-          type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).optional().describe("Filter by annotation type"),
+          type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).optional().describe("Filter by redline type"),
           author: z.string().optional().describe("Filter by author, e.g. 'human' or 'claude'"),
-        }).optional().describe("Include inline annotations. Pass {} for all, or add scope/type/author filters."),
+        }).optional().describe("Include inline redlines. Pass {} for all, or add scope/type/author filters."),
         scratch_index: z.boolean().optional().describe("Include the scratch folder index (scratch.json)"),
         canon_list: z.union([z.boolean(), z.string()]).optional().describe("true = list canon types; string = list entries within that type, e.g. 'characters'"),
         part_notes: z.array(z.string()).optional().describe("Part-level planning notes, e.g. ['part-01']. Returns structured object with topMatter + sections TOC when # sections exist. Use # notation for specific sections: 'part-01#thematic-architecture'. Returns raw string if no sections. Empty string if file doesn't exist."),
@@ -550,14 +550,14 @@ async function createMcpServer(): Promise<McpServer> {
       "Create a new entity. target='project' bootstraps a new project. " +
       "target='part' creates a part directory. target='chapter' creates a chapter. " +
       "target='beat' adds a beat to a chapter. target='scratch' adds a scratch file. " +
-      "target='note' inserts an inline annotation.",
+      "target='redline' inserts an inline redline.",
     inputSchema: {
-      target: z.enum(["project", "part", "chapter", "beat", "scratch", "note"]).describe("What to create"),
+      target: z.enum(["project", "part", "chapter", "beat", "scratch", "redline"]).describe("What to create"),
       project: projectParam.optional().describe("Project identifier — IS the new project id for target='project'; required for all targets"),
       title: z.string().optional().describe("Display title (project, part, chapter)"),
       template: z.string().optional().describe("Template ID for project setup (project only)"),
-      part_id: z.string().optional().describe("Part identifier (part, chapter, beat, note)"),
-      chapter_id: z.string().optional().describe("Chapter identifier (chapter, beat, note)"),
+      part_id: z.string().optional().describe("Part identifier (part, chapter, beat, redline)"),
+      chapter_id: z.string().optional().describe("Chapter identifier (chapter, beat, redline)"),
       summary: z.string().optional().describe("Summary (part, chapter)"),
       arc: z.string().optional().describe("Arc description (part only)"),
       pov: z.string().optional().describe("POV character id (chapter only)"),
@@ -580,12 +580,12 @@ async function createMcpServer(): Promise<McpServer> {
       characters: z.array(z.string()).optional().describe("Characters involved (scratch only)"),
       mood: z.string().optional().describe("Mood/tone description (scratch only)"),
       potential_placement: z.string().optional().describe("Where this might end up, e.g. 'part-01/chapter-04' (scratch only)"),
-      line_number: z.number().optional().describe("Line number to insert annotation after, 1-based (note only)"),
-      note_type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).optional().describe(
-        "Annotation type (note only): 'note' (general), 'dev' (structural), 'line' (prose craft), 'continuity' (consistency), 'query' (question), 'flag' (wordless marker)"
+      line_number: z.number().optional().describe("Line number to insert redline after, 1-based (redline only)"),
+      redline_type: z.enum(["note", "dev", "line", "continuity", "query", "flag"]).optional().describe(
+        "Redline type (redline only): 'note' (general), 'dev' (structural), 'line' (prose craft), 'continuity' (consistency), 'query' (question), 'flag' (wordless marker)"
       ),
-      message: z.string().optional().describe("Annotation message (note only, required except for 'flag')"),
-      version: z.string().optional().describe("Version token for line-number translation if file changed (note only)"),
+      message: z.string().optional().describe("Redline message (redline only, required except for 'flag')"),
+      version: z.string().optional().describe("Version token for line-number translation if file changed (redline only)"),
     },
   }, async (args) => {
     const { target } = args;
@@ -660,20 +660,20 @@ async function createMcpServer(): Promise<McpServer> {
           );
           return jsonResult(results);
         }
-        case "note": {
-          requireArgs(args, ["project", "part_id", "chapter_id", "note_type"], "target='note'");
-          if (args.line_number == null) throw new Error("line_number is required for target='note'");
-          if (args.note_type !== "flag" && !args.message) {
-            throw new Error(`message is required for @${args.note_type} annotations`);
+        case "redline": {
+          requireArgs(args, ["project", "part_id", "chapter_id", "redline_type"], "target='redline'");
+          if (args.line_number == null) throw new Error("line_number is required for target='redline'");
+          if (args.redline_type !== "flag" && !args.message) {
+            throw new Error(`message is required for @${args.redline_type} redlines`);
           }
           const root = store.projectRoot(args.project!);
-          const result = await store.insertAnnotation(
+          const result = await store.insertRedline(
             args.project!, args.part_id!, args.chapter_id!, args.line_number,
-            args.note_type as "note" | "dev" | "line" | "continuity" | "query" | "flag",
+            args.redline_type as "note" | "dev" | "line" | "continuity" | "query" | "flag",
             args.message ?? null, "claude", args.version
           );
 
-          await commitFiles(root, [result.path], `Added @${args.note_type}(claude) annotation to ${args.part_id}/${args.chapter_id}`);
+          await commitFiles(root, [result.path], `Added @${args.redline_type}(claude) redline to ${args.part_id}/${args.chapter_id}`);
 
           // Get post-commit version
           const { getFileVersion } = await import("./git.js");
@@ -824,7 +824,7 @@ async function createMcpServer(): Promise<McpServer> {
       part_id: z.string().optional().describe("Part identifier (beat, part_notes, chapter_notes)"),
       chapter_id: z.string().optional().describe("Chapter identifier (beat, chapter_notes)"),
       beat_id: z.string().optional().describe("Beat identifier (beat only)"),
-      append: z.boolean().optional().describe("If true, append as a new variant block after existing one(s) (beat only)"),
+      append: z.boolean().optional().describe("If true: for beats, append as a new variant block; for notes and canon, append content to the end of the existing file"),
       source_scratch: z.string().optional().describe("Scratch filename to promote into this beat instead of providing content (beat only)"),
       type: z.string().optional().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions' (canon only)"),
       id: z.string().optional().describe("Canon entry id (canon only)"),
@@ -871,8 +871,8 @@ async function createMcpServer(): Promise<McpServer> {
           const root = store.projectRoot(project);
           const results = await withCommit(
             root,
-            () => store.updateCanon(project, args.type!, args.id!, args.content!, args.meta),
-            `Canon update: ${args.type}/${args.id}`
+            () => store.updateCanon(project, args.type!, args.id!, args.content!, args.meta, args.append ?? false),
+            `${args.append ? "Appended to" : "Canon update:"} ${args.type}/${args.id}`
           );
           return jsonResult(results);
         }
@@ -882,8 +882,8 @@ async function createMcpServer(): Promise<McpServer> {
           const root = store.projectRoot(project);
           const result = await withCommit(
             root,
-            () => store.writePartNotes(project, args.part_id!, args.content!),
-            `Updated part notes: ${args.part_id}`
+            () => store.writePartNotes(project, args.part_id!, args.content!, args.append ?? false),
+            `${args.append ? "Appended to" : "Updated"} part notes: ${args.part_id}`
           );
           return jsonResult(result);
         }
@@ -893,8 +893,8 @@ async function createMcpServer(): Promise<McpServer> {
           const root = store.projectRoot(project);
           const result = await withCommit(
             root,
-            () => store.writeChapterNotes(project, args.part_id!, args.chapter_id!, args.content!),
-            `Updated chapter notes: ${args.part_id}/${args.chapter_id}`
+            () => store.writeChapterNotes(project, args.part_id!, args.chapter_id!, args.content!, args.append ?? false),
+            `${args.append ? "Appended to" : "Updated"} chapter notes: ${args.part_id}/${args.chapter_id}`
           );
           return jsonResult(result);
         }
@@ -916,14 +916,14 @@ async function createMcpServer(): Promise<McpServer> {
       "find/replace pairs, applied atomically — if any edit fails, none are applied. " +
       "Use instead of write when changing words or sentences rather than rewriting.",
     inputSchema: {
-      target: z.enum(["beat", "canon"]).describe("What to edit"),
+      target: z.enum(["beat", "canon", "part_notes", "chapter_notes"]).describe("What to edit"),
       project: projectParam,
       edits: z.array(z.object({
         old_str: z.string().describe("Exact text to find (must match exactly once)"),
         new_str: z.string().describe("Replacement text (empty string = deletion)"),
       })).describe("Ordered list of find/replace pairs. Applied sequentially — edit 2 sees the result of edit 1."),
-      part_id: z.string().optional().describe("Part identifier (beat only)"),
-      chapter_id: z.string().optional().describe("Chapter identifier (beat only)"),
+      part_id: z.string().optional().describe("Part identifier (beat, part_notes, chapter_notes)"),
+      chapter_id: z.string().optional().describe("Chapter identifier (beat, chapter_notes)"),
       beat_id: z.string().optional().describe("Beat identifier (beat only)"),
       variant_index: z.number().optional().describe("Which variant to edit, default 0 (beat only)"),
       type: z.string().optional().describe("Canon type directory name, e.g. 'characters' (canon only)"),
@@ -952,6 +952,20 @@ async function createMcpServer(): Promise<McpServer> {
             `Edited canon/${args.type}/${args.id} (${outcome.edits_applied} edits)`);
           return jsonResult(outcome);
         }
+        case "part_notes": {
+          requireArgs(args, ["part_id"], "target='part_notes'");
+          const outcome = await store.editPartNotes(project, args.part_id!, edits);
+          await commitFiles(root, [outcome.result.path],
+            `Edited part notes: ${args.part_id} (${outcome.edits_applied} edits)`);
+          return jsonResult(outcome);
+        }
+        case "chapter_notes": {
+          requireArgs(args, ["part_id", "chapter_id"], "target='chapter_notes'");
+          const outcome = await store.editChapterNotes(project, args.part_id!, args.chapter_id!, edits);
+          await commitFiles(root, [outcome.result.path],
+            `Edited chapter notes: ${args.part_id}/${args.chapter_id} (${outcome.edits_applied} edits)`);
+          return jsonResult(outcome);
+        }
       }
     } catch (err) {
       logToolError("edit", err);
@@ -967,14 +981,14 @@ async function createMcpServer(): Promise<McpServer> {
     title: "Remove",
     description:
       "Remove content. target='beat' removes a beat from a chapter (prose moved to scratch). " +
-      "target='notes' batch-removes inline annotations by ID after they've been addressed.",
+      "target='redlines' batch-removes inline redlines by ID after they've been addressed.",
     inputSchema: {
-      target: z.enum(["beat", "notes"]).describe("What to remove"),
+      target: z.enum(["beat", "redlines"]).describe("What to remove"),
       project: projectParam,
       part_id: z.string().optional().describe("Part identifier (beat only)"),
       chapter_id: z.string().optional().describe("Chapter identifier (beat only)"),
       beat_id: z.string().optional().describe("Beat identifier to remove (beat only)"),
-      note_ids: z.array(z.string()).optional().describe("Note IDs to resolve (notes only), e.g. ['part-01/chapter-03:b02:n47']. Get these from get_context with notes include."),
+      redline_ids: z.array(z.string()).optional().describe("Redline IDs to resolve (redlines only), e.g. ['part-01/chapter-03:b02:n47']. Get these from get_context with redlines include."),
     },
   }, async (args) => {
     const { target, project } = args;
@@ -991,16 +1005,16 @@ async function createMcpServer(): Promise<McpServer> {
           );
           return jsonResult(results);
         }
-        case "notes": {
-          if (!args.note_ids || args.note_ids.length === 0) {
-            return textResult("No note IDs provided. Nothing to resolve.");
+        case "redlines": {
+          if (!args.redline_ids || args.redline_ids.length === 0) {
+            return textResult("No redline IDs provided. Nothing to resolve.");
           }
-          const results = await store.removeAnnotationLines(project, args.note_ids);
+          const results = await store.removeRedlineLines(project, args.redline_ids);
           if (results.length > 0) {
             await commitFiles(root, results.map((r) => r.path),
-              `Resolved ${args.note_ids.length} annotation(s)`);
+              `Resolved ${args.redline_ids.length} redline(s)`);
           }
-          return jsonResult({ resolved: args.note_ids.length, files_modified: results.length });
+          return jsonResult({ resolved: args.redline_ids.length, files_modified: results.length });
         }
       }
     } catch (err) {
@@ -1256,12 +1270,12 @@ app.get("/help", async () => {
     tools: {
       list_projects: "List all available projects with status briefing.",
       template: "Manage templates. action: list | get | save | apply. Only 'apply' needs a project param.",
-      get_context: "Primary read tool — returns any combination of project data in one call, including search. Supports: project_meta, parts, chapter_meta, chapter_prose, beats, beat_variants, canon (with # section notation), scratch, scratch_index, dirty_nodes, notes, canon_list, guide, search.",
-      create: "Create entities. target: project | part | chapter | beat | scratch | note.",
+      get_context: "Primary read tool — returns any combination of project data in one call, including search. Supports: project_meta, parts, chapter_meta, chapter_prose, beats, beat_variants, canon (with # section notation), scratch, scratch_index, dirty_nodes, redlines, canon_list, guide, search.",
+      create: "Create entities. target: project | part | chapter | beat | scratch | redline.",
       update: "Update metadata. target: project | part | chapter | node (dirty/clean).",
-      write: "Write/replace content. target: beat (prose or promote scratch) | canon.",
-      edit: "Surgical find/replace. target: beat | canon. Atomic ordered edits.",
-      remove: "Remove content. target: beat (prose → scratch) | notes (resolve annotations).",
+      write: "Write/replace content. target: beat | canon | part_notes | chapter_notes. append=true to add content to end of notes/canon.",
+      edit: "Surgical find/replace. target: beat | canon | part_notes | chapter_notes. Atomic ordered edits.",
+      remove: "Remove content. target: beat (prose → scratch) | redlines (resolve redlines).",
       select_variant: "Keep one variant of a beat, archive the rest to scratch.",
       reorder_beats: "Reorder beats within a chapter. Meta and prose updated together.",
       session_summary: "Create a session-level git commit summarizing the working session.",

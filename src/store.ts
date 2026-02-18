@@ -105,47 +105,47 @@ async function writeMd(path: string, content: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Annotation types
+// Redline types
 // ---------------------------------------------------------------------------
 
-const ANNOTATION_TYPES = ["note", "dev", "line", "continuity", "query", "flag"] as const;
-type AnnotationType = (typeof ANNOTATION_TYPES)[number];
-const ANNOTATION_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*?))?\s*-->$/;
-// Detects annotation opening that may not close on the same line
-const ANNOTATION_START_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*))?$/;
+const REDLINE_TYPES = ["note", "dev", "line", "continuity", "query", "flag"] as const;
+type RedlineType = (typeof REDLINE_TYPES)[number];
+const REDLINE_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*?))?\s*-->$/;
+// Detects redline opening that may not close on the same line
+const REDLINE_START_REGEX = /^<!--\s*@(note|dev|line|continuity|query|flag)(?:\((\w+)\))?(?::\s*(.*))?$/;
 const BEAT_MARKER_REGEX = /^<!--\s*beat:(\S+)\s*(?:\[([^\]]+)\]\s*)?\|\s*(.+?)\s*-->/;
 const SUMMARY_COMMENT_REGEX = /^<!--\s*summary:\s*(.*?)\s*-->$/;
 const SUMMARY_START_REGEX = /^<!--\s*summary:\s*(.*)$/;
 const CHAPTER_SUMMARY_REGEX = /^<!--\s*chapter-summary:\s*(.*?)\s*-->$/;
 const CHAPTER_SUMMARY_START_REGEX = /^<!--\s*chapter-summary:\s*(.*)$/;
 
-export interface ParsedAnnotation {
+export interface ParsedRedline {
   id: string;
-  type: AnnotationType;
+  type: RedlineType;
   author: string;
   message: string | null;
   location: { part: string; chapter: string; beat: string; line_number: number };
   context: { before: string | null; after: string | null };
 }
 
-export interface AnnotationSummary {
+export interface RedlineSummary {
   total: number;
   by_type: Record<string, number>;
   by_author: Record<string, number>;
 }
 
-export interface AnnotationWarning {
+export interface RedlineWarning {
   line: number;
   beat: string;
   content: string;
   issue: string;
 }
 
-export interface GetAnnotationsResult {
-  notes: ParsedAnnotation[];
-  summary: AnnotationSummary;
+export interface GetRedlinesResult {
+  redlines: ParsedRedline[];
+  summary: RedlineSummary;
   versions: Record<string, string>;
-  warnings: AnnotationWarning[];
+  warnings: RedlineWarning[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,12 +1101,17 @@ export async function getChapterNoteSection(
  * Write part-level notes to part-XX.notes.md.
  * Creates file if it doesn't exist.
  */
-export async function writePartNotes(projectId: string, partId: string, content: string): Promise<WriteResult> {
+export async function writePartNotes(projectId: string, partId: string, content: string, append: boolean = false): Promise<WriteResult> {
   const notesPath = join(projectRoot(projectId), "parts", partId, `${partId}.notes.md`);
-  await writeMd(notesPath, content);
+  if (append) {
+    const existing = existsSync(notesPath) ? await readMd(notesPath) : "";
+    await writeMd(notesPath, existing + "\n\n" + content);
+  } else {
+    await writeMd(notesPath, content);
+  }
   return {
     path: notesPath,
-    description: `Updated part notes: ${partId}`,
+    description: `${append ? "Appended to" : "Updated"} part notes: ${partId}`,
   };
 }
 
@@ -1118,13 +1123,80 @@ export async function writeChapterNotes(
   projectId: string,
   partId: string,
   chapterId: string,
-  content: string
+  content: string,
+  append: boolean = false
 ): Promise<WriteResult> {
   const notesPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.notes.md`);
-  await writeMd(notesPath, content);
+  if (append) {
+    const existing = existsSync(notesPath) ? await readMd(notesPath) : "";
+    await writeMd(notesPath, existing + "\n\n" + content);
+  } else {
+    await writeMd(notesPath, content);
+  }
   return {
     path: notesPath,
-    description: `Updated chapter notes: ${partId}/${chapterId}`,
+    description: `${append ? "Appended to" : "Updated"} chapter notes: ${partId}/${chapterId}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Surgical notes editing
+// ---------------------------------------------------------------------------
+
+export async function editPartNotes(
+  projectId: string,
+  partId: string,
+  edits: { old_str: string; new_str: string }[]
+): Promise<{
+  result: WriteResult;
+  edits_applied: number;
+  changes: { old_str: string; new_str: string; context: string }[];
+}> {
+  const notesPath = join(projectRoot(projectId), "parts", partId, `${partId}.notes.md`);
+  const ref = `${partId}.notes.md`;
+
+  if (edits.length === 0) {
+    return { result: { path: notesPath, description: `No edits applied to ${ref}` }, edits_applied: 0, changes: [] };
+  }
+
+  if (!existsSync(notesPath)) throw new Error(`Part notes not found: ${ref}`);
+  const raw = await readMd(notesPath);
+  const { text, changes } = applyEdits(raw, edits, ref);
+  await writeMd(notesPath, text);
+
+  return {
+    result: { path: notesPath, description: `Applied ${edits.length} edit(s) to ${ref}` },
+    edits_applied: edits.length,
+    changes,
+  };
+}
+
+export async function editChapterNotes(
+  projectId: string,
+  partId: string,
+  chapterId: string,
+  edits: { old_str: string; new_str: string }[]
+): Promise<{
+  result: WriteResult;
+  edits_applied: number;
+  changes: { old_str: string; new_str: string; context: string }[];
+}> {
+  const notesPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.notes.md`);
+  const ref = `${partId}/${chapterId}.notes.md`;
+
+  if (edits.length === 0) {
+    return { result: { path: notesPath, description: `No edits applied to ${ref}` }, edits_applied: 0, changes: [] };
+  }
+
+  if (!existsSync(notesPath)) throw new Error(`Chapter notes not found: ${ref}`);
+  const raw = await readMd(notesPath);
+  const { text, changes } = applyEdits(raw, edits, ref);
+  await writeMd(notesPath, text);
+
+  return {
+    result: { path: notesPath, description: `Applied ${edits.length} edit(s) to ${ref}` },
+    edits_applied: edits.length,
+    changes,
   };
 }
 
@@ -1463,22 +1535,22 @@ export async function getDirtyNodes(projectId: string): Promise<DirtyNode[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Annotation parsing & manipulation
+// Redline parsing & manipulation
 // ---------------------------------------------------------------------------
 
 /**
- * Parse all inline annotations from a chapter's markdown.
+ * Parse all inline redlines from a chapter's markdown.
  * Pure function — no I/O. Walks lines top-to-bottom tracking beat context.
- * Returns { annotations, warnings } — warnings surface corrupt/unparseable markup.
+ * Returns { redlines, warnings } — warnings surface corrupt/unparseable markup.
  */
-export function parseAnnotations(
+export function parseRedlines(
   markdown: string,
   partId: string,
   chapterId: string
-): { annotations: ParsedAnnotation[]; warnings: AnnotationWarning[] } {
+): { redlines: ParsedRedline[]; warnings: RedlineWarning[] } {
   const lines = markdown.split("\n");
-  const annotations: ParsedAnnotation[] = [];
-  const warnings: AnnotationWarning[] = [];
+  const redlines: ParsedRedline[] = [];
+  const warnings: RedlineWarning[] = [];
   let currentBeat = "none";
 
   for (let i = 0; i < lines.length; i++) {
@@ -1491,24 +1563,24 @@ export function parseAnnotations(
       continue;
     }
 
-    // Check for annotation — single-line first
-    let annoMatch = ANNOTATION_REGEX.exec(line);
-    let endLine = i; // last line consumed by this annotation
+    // Check for redline — single-line first
+    let annoMatch = REDLINE_REGEX.exec(line);
+    let endLine = i; // last line consumed by this redline
 
     if (!annoMatch) {
-      // Multi-line annotation: starts with <!-- @type but --> is on a later line
-      const startMatch = ANNOTATION_START_REGEX.exec(line);
+      // Multi-line redline: starts with <!-- @type but --> is on a later line
+      const startMatch = REDLINE_START_REGEX.exec(line);
       if (startMatch) {
         // Scan forward for closing -->, but abort at structural boundaries
         let joined = line;
         let found = false;
         for (let j = i + 1; j < lines.length; j++) {
           const scanLine = lines[j]!.trim();
-          // Abort if we hit a structural marker or another annotation/comment start
+          // Abort if we hit a structural marker or another redline/comment start
           if (BEAT_MARKER_REGEX.test(scanLine)) break;
           if (scanLine === "<!-- /chapter -->") break;
-          if (ANNOTATION_START_REGEX.test(scanLine)) break;
-          if (ANNOTATION_REGEX.test(scanLine)) break;
+          if (REDLINE_START_REGEX.test(scanLine)) break;
+          if (REDLINE_REGEX.test(scanLine)) break;
           joined += " " + scanLine;
           if (scanLine.includes("-->")) {
             endLine = j;
@@ -1519,17 +1591,17 @@ export function parseAnnotations(
         if (found) {
           // Normalize whitespace and try to match as a single line
           const normalized = joined.replace(/\s+/g, " ").trim();
-          annoMatch = ANNOTATION_REGEX.exec(normalized);
+          annoMatch = REDLINE_REGEX.exec(normalized);
         }
         if (!annoMatch) {
-          // Annotation-like start that couldn't be parsed — warn
+          // Redline-like start that couldn't be parsed — warn
           warnings.push({
             line: i + 1,
             beat: currentBeat,
             content: line,
             issue: found
-              ? "Annotation comment could not be parsed after joining lines"
-              : "Annotation start without closing -->",
+              ? "Redline comment could not be parsed after joining lines"
+              : "Redline start without closing -->",
           });
         }
       }
@@ -1537,7 +1609,7 @@ export function parseAnnotations(
     }
 
     const lineNumber = i + 1; // 1-based
-    const type = annoMatch[1]! as AnnotationType;
+    const type = annoMatch[1]! as RedlineType;
     const author = annoMatch[2] ?? "human";
     const message = annoMatch[3]?.replace(/\s*\n\s*/g, " ").trim() ?? null;
 
@@ -1546,7 +1618,7 @@ export function parseAnnotations(
     for (let b = i - 1; b >= 0; b--) {
       const bLine = lines[b]!.trim();
       if (!bLine) continue;
-      if (bLine.startsWith("<!--")) continue; // skip any HTML comment (annotations, briefs, etc.)
+      if (bLine.startsWith("<!--")) continue; // skip any HTML comment (redlines, briefs, etc.)
       if (BEAT_MARKER_REGEX.test(bLine)) break;
       before = bLine;
       break;
@@ -1562,7 +1634,7 @@ export function parseAnnotations(
       break;
     }
 
-    annotations.push({
+    redlines.push({
       id: `${partId}/${chapterId}:${currentBeat}:n${lineNumber}`,
       type,
       author,
@@ -1571,51 +1643,51 @@ export function parseAnnotations(
       context: { before, after },
     });
 
-    // Skip past any extra lines consumed by a multi-line annotation
+    // Skip past any extra lines consumed by a multi-line redline
     if (endLine > i) i = endLine;
   }
 
-  return { annotations, warnings };
+  return { redlines, warnings };
 }
 
 /**
- * Parse a note ID into its components.
+ * Parse a redline ID into its components.
  * Format: "part-01/chapter-03:b02:n47"
  */
-function parseNoteId(noteId: string): {
+function parseRedlineId(redlineId: string): {
   partId: string;
   chapterId: string;
   beatId: string;
   lineNumber: number;
 } {
-  const slashIdx = noteId.indexOf("/");
+  const slashIdx = redlineId.indexOf("/");
   if (slashIdx === -1) {
-    throw new Error(`Invalid note ID "${noteId}". Expected format: "part-01/chapter-03:b02:n47"`);
+    throw new Error(`Invalid redline ID "${redlineId}". Expected format: "part-01/chapter-03:b02:n47"`);
   }
-  const partId = noteId.slice(0, slashIdx);
-  const rest = noteId.slice(slashIdx + 1);
+  const partId = redlineId.slice(0, slashIdx);
+  const rest = redlineId.slice(slashIdx + 1);
   const colonParts = rest.split(":");
   if (colonParts.length !== 3) {
-    throw new Error(`Invalid note ID "${noteId}". Expected format: "part-01/chapter-03:b02:n47"`);
+    throw new Error(`Invalid redline ID "${redlineId}". Expected format: "part-01/chapter-03:b02:n47"`);
   }
   const chapterId = colonParts[0]!;
   const beatId = colonParts[1]!;
   const lineStr = colonParts[2]!;
   if (!lineStr.startsWith("n")) {
-    throw new Error(`Invalid note ID "${noteId}". Line segment must start with 'n'`);
+    throw new Error(`Invalid redline ID "${redlineId}". Line segment must start with 'n'`);
   }
   const lineNumber = parseInt(lineStr.slice(1), 10);
   if (isNaN(lineNumber) || lineNumber < 1) {
-    throw new Error(`Invalid line number in note ID "${noteId}"`);
+    throw new Error(`Invalid line number in redline ID "${redlineId}"`);
   }
   return { partId, chapterId, beatId, lineNumber };
 }
 
 /**
- * Build an annotation HTML comment string, word-wrapped at ~80 columns.
+ * Build a redline HTML comment string, word-wrapped at ~80 columns.
  */
-function buildAnnotationComment(
-  type: AnnotationType,
+function buildRedlineComment(
+  type: RedlineType,
   author: string,
   message: string | null
 ): string {
@@ -1671,14 +1743,14 @@ function parseScopeRef(scope: string): {
 }
 
 /**
- * Get annotations across chapters, with optional filtering.
+ * Get redlines across chapters, with optional filtering.
  */
-export async function getAnnotations(
+export async function getRedlines(
   projectId: string,
   scope?: string,
   type?: string,
   author?: string
-): Promise<GetAnnotationsResult> {
+): Promise<GetRedlinesResult> {
   const root = projectRoot(projectId);
   let chaptersToScan: { partId: string; chapterId: string }[] = [];
   let beatFilter: string | undefined;
@@ -1709,16 +1781,16 @@ export async function getAnnotations(
     }
   }
 
-  let allNotes: ParsedAnnotation[] = [];
-  const allWarnings: AnnotationWarning[] = [];
+  let allRedlines: ParsedRedline[] = [];
+  const allWarnings: RedlineWarning[] = [];
   const versions: Record<string, string> = {};
 
   for (const { partId, chapterId } of chaptersToScan) {
     try {
       const mdPath = join(root, "parts", partId, `${chapterId}.md`);
       const markdown = await readMd(mdPath);
-      const { annotations, warnings } = parseAnnotations(markdown, partId, chapterId);
-      allNotes.push(...annotations);
+      const { redlines, warnings } = parseRedlines(markdown, partId, chapterId);
+      allRedlines.push(...redlines);
       allWarnings.push(...warnings);
 
       const relPath = join("parts", partId, `${chapterId}.md`);
@@ -1731,41 +1803,41 @@ export async function getAnnotations(
 
   // Apply filters
   if (beatFilter) {
-    allNotes = allNotes.filter((n) => n.location.beat === beatFilter);
+    allRedlines = allRedlines.filter((n) => n.location.beat === beatFilter);
   }
   if (type) {
-    allNotes = allNotes.filter((n) => n.type === type);
+    allRedlines = allRedlines.filter((n) => n.type === type);
   }
   if (author) {
-    allNotes = allNotes.filter((n) => n.author === author);
+    allRedlines = allRedlines.filter((n) => n.author === author);
   }
 
   // Build summary
   const by_type: Record<string, number> = {};
   const by_author: Record<string, number> = {};
-  for (const note of allNotes) {
-    by_type[note.type] = (by_type[note.type] ?? 0) + 1;
-    by_author[note.author] = (by_author[note.author] ?? 0) + 1;
+  for (const rl of allRedlines) {
+    by_type[rl.type] = (by_type[rl.type] ?? 0) + 1;
+    by_author[rl.author] = (by_author[rl.author] ?? 0) + 1;
   }
 
   return {
-    notes: allNotes,
-    summary: { total: allNotes.length, by_type, by_author },
+    redlines: allRedlines,
+    summary: { total: allRedlines.length, by_type, by_author },
     versions,
     warnings: allWarnings,
   };
 }
 
 /**
- * Insert an annotation after a specific line in a chapter.
+ * Insert a redline after a specific line in a chapter.
  * Optionally accepts a version token for line-number translation.
  */
-export async function insertAnnotation(
+export async function insertRedline(
   projectId: string,
   partId: string,
   chapterId: string,
   lineNumber: number,
-  type: AnnotationType,
+  type: RedlineType,
   message: string | null,
   author: string,
   version?: string
@@ -1810,19 +1882,19 @@ export async function insertAnnotation(
     }
   }
 
-  // Build and insert annotation
-  const comment = buildAnnotationComment(type, author, message);
+  // Build and insert redline
+  const comment = buildRedlineComment(type, author, message);
   // Insert after the target line (index = targetLine since lines are 0-indexed)
   lines.splice(targetLine, 0, comment);
 
   await writeMd(mdPath, lines.join("\n"));
 
-  const insertedLine = targetLine + 1; // 1-based line number of the inserted annotation
+  const insertedLine = targetLine + 1; // 1-based line number of the inserted redline
   const id = `${partId}/${chapterId}:${beatId}:n${insertedLine}`;
 
   return {
     path: mdPath,
-    description: `Added @${type}(${author}) annotation to ${partId}/${chapterId}:${beatId}`,
+    description: `Added @${type}(${author}) redline to ${partId}/${chapterId}:${beatId}`,
     id,
     inserted_after_line: targetLine,
     version: currentVersion, // Will be updated to post-commit version by server handler
@@ -1830,21 +1902,21 @@ export async function insertAnnotation(
 }
 
 /**
- * Remove annotation lines from chapter files by note IDs.
+ * Remove redline lines from chapter files by redline IDs.
  * Uses filtering (not sequential deletion) to avoid line-shifting issues.
  */
-export async function removeAnnotationLines(
+export async function removeRedlineLines(
   projectId: string,
-  noteIds: string[]
+  redlineIds: string[]
 ): Promise<WriteResult[]> {
-  if (noteIds.length === 0) return [];
+  if (redlineIds.length === 0) return [];
 
   const root = projectRoot(projectId);
 
   // Group by chapter file
   const byChapter = new Map<string, { partId: string; chapterId: string; lineNumbers: number[] }>();
-  for (const noteId of noteIds) {
-    const { partId, chapterId, lineNumber } = parseNoteId(noteId);
+  for (const redlineId of redlineIds) {
+    const { partId, chapterId, lineNumber } = parseRedlineId(redlineId);
     const key = `${partId}/${chapterId}`;
     if (!byChapter.has(key)) {
       byChapter.set(key, { partId, chapterId, lineNumbers: [] });
@@ -1859,8 +1931,8 @@ export async function removeAnnotationLines(
     const markdown = await readMd(mdPath);
     const lines = markdown.split("\n");
 
-    // Verify each target line is actually an annotation and collect all lines to remove
-    // (multi-line annotations may span multiple lines)
+    // Verify each target line is actually a redline and collect all lines to remove
+    // (multi-line redlines may span multiple lines)
     const toRemove = new Set<number>();
     for (const ln of lineNumbers) {
       if (ln < 1 || ln > lines.length) {
@@ -1869,11 +1941,11 @@ export async function removeAnnotationLines(
         );
       }
       const content = lines[ln - 1]!.trim();
-      if (ANNOTATION_REGEX.test(content)) {
-        // Single-line annotation
+      if (REDLINE_REGEX.test(content)) {
+        // Single-line redline
         toRemove.add(ln);
-      } else if (ANNOTATION_START_REGEX.test(content)) {
-        // Multi-line annotation: scan forward for closing -->, stop at structural boundaries
+      } else if (REDLINE_START_REGEX.test(content)) {
+        // Multi-line redline: scan forward for closing -->, stop at structural boundaries
         toRemove.add(ln);
         for (let j = ln; j < lines.length; j++) {
           const scanLine = lines[j]!.trim();
@@ -1884,18 +1956,18 @@ export async function removeAnnotationLines(
         }
       } else {
         throw new Error(
-          `Line ${ln} is not an annotation: '${content}'. Notes may have shifted — re-read with get_notes.`
+          `Line ${ln} is not a redline: '${content}'. Redlines may have shifted — re-read with get_context.`
         );
       }
     }
 
-    // Filter out annotation lines
+    // Filter out redline lines
     const filtered = lines.filter((_, i) => !toRemove.has(i + 1));
     await writeMd(mdPath, filtered.join("\n"));
 
     results.push({
       path: mdPath,
-      description: `Resolved ${lineNumbers.length} annotation(s) in ${partId}/${chapterId}`,
+      description: `Resolved ${lineNumbers.length} redline(s) in ${partId}/${chapterId}`,
     });
   }
 
@@ -2447,7 +2519,7 @@ export interface ContextInclude {
   dirty_nodes?: boolean;
   project_meta?: boolean;
   guide?: boolean;
-  notes?: { scope?: string; type?: string; author?: string };
+  redlines?: { scope?: string; type?: string; author?: string };
   scratch_index?: boolean;
   canon_list?: string | boolean;
   part_notes?: string[];
@@ -2604,13 +2676,13 @@ export async function getContext(
     }
   }
 
-  // Notes — inline annotations with optional filters
-  if (include.notes) {
+  // Redlines — inline editorial marks with optional filters
+  if (include.redlines) {
     try {
-      const { scope, type, author } = include.notes;
-      response.notes = await getAnnotations(projectId, scope, type, author);
+      const { scope, type, author } = include.redlines;
+      response.redlines = await getRedlines(projectId, scope, type, author);
     } catch (err) {
-      errors["notes"] = err instanceof Error ? err.message : String(err);
+      errors["redlines"] = err instanceof Error ? err.message : String(err);
     }
   }
 
@@ -2900,7 +2972,8 @@ export async function updateCanon(
   type: string,
   id: string,
   content: string,
-  meta?: unknown
+  meta?: unknown,
+  append: boolean = false
 ): Promise<WriteResult[]> {
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
@@ -2917,8 +2990,13 @@ export async function updateCanon(
   const label = isDir ? `canon/${type}/${id}/brief.md` : `canon/${type}/${id}.md`;
   const metaLabel = isDir ? `canon/${type}/${id}/meta.json` : `canon/${type}/${id}.meta.json`;
 
-  await writeMd(mdPath, content);
-  results.push({ path: mdPath, description: `Updated ${label}` });
+  if (append && existsSync(mdPath)) {
+    const existingContent = await readMd(mdPath);
+    await writeMd(mdPath, existingContent + "\n\n" + content);
+  } else {
+    await writeMd(mdPath, content);
+  }
+  results.push({ path: mdPath, description: `${append ? "Appended to" : "Updated"} ${label}` });
   if (meta) {
     await writeJson(metaPath, meta);
     results.push({ path: metaPath, description: `Updated ${metaLabel}` });
