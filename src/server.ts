@@ -499,13 +499,13 @@ async function createMcpServer(): Promise<McpServer> {
           author: z.string().optional().describe("Filter by author, e.g. 'human' or 'claude'"),
         }).optional().describe("Include inline redlines. Pass {} for all, or add scope/type/author filters."),
         scratch_index: z.boolean().optional().describe("Include the scratch folder index (scratch.json)"),
-        canon_list: z.union([z.boolean(), z.string()]).optional().describe("true = list canon types; string = list entries within that type, e.g. 'characters'"),
+        canon_list: z.union([z.boolean(), z.string()]).optional().describe("true = list canon types; string = list entries within that type with enriched metadata (role, appears_in_count, last_updated). Archived entries excluded by default."),
         part_notes: z.array(z.string()).optional().describe("Part-level planning notes, e.g. ['part-01']. Returns structured object with topMatter + sections TOC when # sections exist. Use # notation for specific sections: 'part-01#thematic-architecture'. Returns raw string if no sections. Empty string if file doesn't exist."),
         chapter_notes: z.array(z.string()).optional().describe("Chapter-level planning notes, e.g. ['part-01/chapter-03']. Returns structured object with topMatter + sections TOC when # sections exist. Use # notation for specific sections: 'part-01/chapter-03#beat-b01'. Returns raw string if no sections. Empty string if file doesn't exist."),
         search: z.object({
           query: z.string().describe("Search query (case-insensitive)"),
-          scope: z.enum(["prose", "canon", "scratch"]).optional().describe("Limit search to a specific scope"),
-        }).optional().describe("Full-text search across prose, canon, and scratch files. Results added to response under 'search' key."),
+          scope: z.enum(["prose", "canon", "scratch", "notes"]).optional().describe("Limit search to a specific scope. 'prose' excludes .notes.md files; 'notes' searches only .notes.md files"),
+        }).optional().describe("Full-text search across prose, canon, scratch, and notes files. Results added to response under 'search' key."),
       }).describe("What to include. Every key is optional. Request exactly what you need."),
     },
   }, async ({ project, include }) => {
@@ -706,9 +706,12 @@ async function createMcpServer(): Promise<McpServer> {
       "Update metadata for an existing entity. target='project' patches project.json. " +
       "target='part' patches part metadata. target='chapter' patches chapter metadata " +
       "(including beats — provide array with just the beats to change, matched by id; unlisted beats untouched). " +
-      "target='node' sets dirty/clean status on any node.",
+      "target='node' sets dirty/clean status on any node. " +
+      "target='scratch' archives/unarchives scratch items. " +
+      "target='beats' batch-updates beat status across chapters. " +
+      "target='canon' archives/unarchives or renames canon entries.",
     inputSchema: {
-      target: z.enum(["project", "part", "chapter", "node"]).describe("What to update"),
+      target: z.enum(["project", "part", "chapter", "node", "scratch", "beats", "canon"]).describe("What to update"),
       project: projectParam,
       part_id: z.string().optional().describe("Part identifier (part, chapter)"),
       chapter_id: z.string().optional().describe("Chapter identifier (chapter only)"),
@@ -745,6 +748,13 @@ async function createMcpServer(): Promise<McpServer> {
       node_ref: z.string().optional().describe("Node reference for target='node', e.g. 'part-01', 'part-01/chapter-02', 'part-01/chapter-02:b03'"),
       mark: z.enum(["dirty", "clean"]).optional().describe("'dirty' to flag for review, 'clean' to clear (node only)"),
       reason: z.string().optional().describe("Why this node is dirty (node only, required when mark='dirty')"),
+      filenames: z.array(z.string()).optional().describe("Scratch filenames to archive/unarchive (scratch only)"),
+      archived: z.boolean().optional().describe("true to archive, false to unarchive (scratch only)"),
+      beat_refs: z.array(z.string()).optional().describe("Beat references for batch updates, e.g. ['part-01/chapter-01:b01', 'part-05/chapter-03:b04'] (beats only)"),
+      type: z.string().optional().describe("Canon type directory name (canon only)"),
+      id: z.string().optional().describe("Canon entry id (canon only)"),
+      action: z.enum(["archive", "unarchive"]).optional().describe("Archive or unarchive a canon entry (canon only)"),
+      new_id: z.string().optional().describe("New canon entry ID for renaming (canon only)"),
     },
   }, async (args) => {
     const { target, project } = args;
@@ -799,6 +809,77 @@ async function createMcpServer(): Promise<McpServer> {
           );
           return jsonResult(results);
         }
+        case "scratch": {
+          if (!args.filenames || args.filenames.length === 0) {
+            throw new Error("filenames is required for target='scratch'");
+          }
+          const root = store.projectRoot(project);
+          const archived = args.archived ?? true;
+          const result = await withCommit(
+            root,
+            () => store.archiveScratch(project, args.filenames!, archived),
+            `${archived ? "Archived" : "Unarchived"} scratch: ${args.filenames!.join(", ")}`
+          );
+          return jsonResult(result);
+        }
+        case "beats": {
+          if (!args.beat_refs || args.beat_refs.length === 0) {
+            throw new Error("beat_refs is required for target='beats'");
+          }
+          if (!args.patch) throw new Error("patch is required for target='beats' (provide status and/or dirty_reason)");
+          const root = store.projectRoot(project);
+
+          // Group beat refs by chapter
+          const byChapter = new Map<string, string[]>();
+          for (const ref of args.beat_refs) {
+            const parsed = store.parseBeatRef(ref);
+            const key = `${parsed.partId}/${parsed.chapterId}`;
+            if (!byChapter.has(key)) byChapter.set(key, []);
+            byChapter.get(key)!.push(parsed.beatId);
+          }
+
+          const allResults: store.WriteResult[] = [];
+          let beatsUpdated = 0;
+
+          for (const [chapterRef, beatIds] of byChapter) {
+            const { partId, chapterId } = store.parseBeatRef(`${chapterRef}:${beatIds[0]!}`);
+            const beatPatches = beatIds.map(beatId => ({
+              id: beatId,
+              ...(args.patch!.status !== undefined ? { status: args.patch!.status } : {}),
+              ...(args.patch!.dirty_reason !== undefined ? { dirty_reason: args.patch!.dirty_reason } : {}),
+            }));
+            const results = await store.updateChapterMeta(project, partId, chapterId, { beats: beatPatches } as Partial<store.ChapterMeta>);
+            allResults.push(...results);
+            beatsUpdated += beatIds.length;
+          }
+
+          await commitFiles(root, allResults.map(r => r.path),
+            `Batch updated ${beatsUpdated} beat(s) across ${byChapter.size} chapter(s)`);
+
+          return jsonResult({
+            beats_updated: beatsUpdated,
+            chapters_touched: byChapter.size,
+            details: allResults,
+          });
+        }
+        case "canon": {
+          if (!args.type) throw new Error("type is required for target='canon'");
+          if (!args.id) throw new Error("id is required for target='canon'");
+          const root = store.projectRoot(project);
+
+          if (args.new_id) {
+            // Rename operation
+            const result = await store.renameCanon(project, args.type, args.id, args.new_id);
+            await commitFiles(root, result.files.map(f => f.path),
+              `Renamed canon ${args.type}/${args.id} → ${args.new_id}`);
+            return jsonResult(result);
+          }
+
+          if (!args.action) throw new Error("action or new_id is required for target='canon'");
+          const result = await store.archiveCanon(project, args.type, args.id, args.action === "archive");
+          await commitFiles(root, [result.path], `${args.action === "archive" ? "Archived" : "Unarchived"} canon ${args.type}/${args.id}`);
+          return jsonResult(result);
+        }
       }
     } catch (err) {
       logToolError("update", err);
@@ -818,9 +899,10 @@ async function createMcpServer(): Promise<McpServer> {
       "target='part_notes' writes part-level planning notes (big-picture context, always relevant to all chapters in this part). " +
       "target='chapter_notes' writes chapter-specific planning notes (detailed planning, psychology, themes, research). " +
       "target='scratch' writes to an existing scratch file. " +
+      "target='guide' writes to the project's GUIDE.md file. " +
       "Notes use flexible markdown organization with proper headers — organize however makes sense for your thinking.",
     inputSchema: {
-      target: z.enum(["beat", "canon", "part_notes", "chapter_notes", "scratch"]).describe("What to write"),
+      target: z.enum(["beat", "canon", "part_notes", "chapter_notes", "scratch", "guide"]).describe("What to write"),
       project: projectParam,
       content: z.string().optional().describe("The content to write. Required unless source_scratch is provided (beat only)."),
       part_id: z.string().optional().describe("Part identifier (beat, part_notes, chapter_notes)"),
@@ -912,6 +994,16 @@ async function createMcpServer(): Promise<McpServer> {
           );
           return jsonResult(result);
         }
+        case "guide": {
+          if (args.content === undefined) throw new Error("content is required for target='guide'");
+          const root = store.projectRoot(project);
+          const result = await withCommit(
+            root,
+            () => store.writeGuide(project, args.content!, args.append ?? false),
+            `${args.append ? "Appended to" : "Updated"} GUIDE.md`
+          );
+          return jsonResult(result);
+        }
       }
     } catch (err) {
       logToolError("write", err);
@@ -930,7 +1022,7 @@ async function createMcpServer(): Promise<McpServer> {
       "find/replace pairs, applied atomically — if any edit fails, none are applied. " +
       "Use instead of write when changing words or sentences rather than rewriting.",
     inputSchema: {
-      target: z.enum(["beat", "canon", "part_notes", "chapter_notes", "scratch"]).describe("What to edit"),
+      target: z.enum(["beat", "canon", "part_notes", "chapter_notes", "scratch", "guide"]).describe("What to edit"),
       project: projectParam,
       edits: z.array(z.object({
         old_str: z.string().describe("Exact text to find (must match exactly once)"),
@@ -986,6 +1078,12 @@ async function createMcpServer(): Promise<McpServer> {
           const outcome = await store.editScratch(project, args.filename, edits);
           await commitFiles(root, [outcome.result.path],
             `Edited scratch/${args.filename} (${outcome.edits_applied} edits)`);
+          return jsonResult(outcome);
+        }
+        case "guide": {
+          const outcome = await store.editGuide(project, edits);
+          await commitFiles(root, [outcome.result.path],
+            `Edited GUIDE.md (${outcome.edits_applied} edits)`);
           return jsonResult(outcome);
         }
       }
@@ -1294,9 +1392,9 @@ app.get("/help", async () => {
       template: "Manage templates. action: list | get | save | apply. Only 'apply' needs a project param.",
       get_context: "Primary read tool — returns any combination of project data in one call, including search. Supports: project_meta, parts, chapter_meta, chapter_prose, beats, beat_variants, canon (with # section notation), scratch, scratch_index, dirty_nodes, redlines, canon_list, guide, search.",
       create: "Create entities. target: project | part | chapter | beat | scratch | redline.",
-      update: "Update metadata. target: project | part | chapter | node (dirty/clean).",
-      write: "Write/replace content. target: beat | canon | part_notes | chapter_notes | scratch. append=true to add content to end of notes/canon/scratch.",
-      edit: "Surgical find/replace. target: beat | canon | part_notes | chapter_notes | scratch. Atomic ordered edits.",
+      update: "Update metadata. target: project | part | chapter | node (dirty/clean) | scratch (archive/unarchive) | beats (batch status) | canon (archive/unarchive/rename).",
+      write: "Write/replace content. target: beat | canon | part_notes | chapter_notes | scratch | guide. append=true to add content to end of notes/canon/scratch/guide.",
+      edit: "Surgical find/replace. target: beat | canon | part_notes | chapter_notes | scratch | guide. Atomic ordered edits.",
       remove: "Remove content. target: beat (prose → scratch) | redlines (resolve redlines).",
       select_variant: "Keep one variant of a beat, archive the rest to scratch.",
       reorder_beats: "Reorder beats within a chapter. Meta and prose updated together.",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fractal MCP feature test suite
-# Runs 63 tests against the Fractal MCP server on localhost:3001
+# Runs 78 tests against the Fractal MCP server on localhost:3001
 # Tests the 12 consolidated tools (down from 28)
 
 set -euo pipefail
@@ -1609,6 +1609,385 @@ if [ "$(echo "$T63_PASS" | cut -d'|' -f1)" = "true" ]; then
   report 63 "edit nonexistent scratch file returns error" "true"
 else
   report 63 "edit nonexistent scratch" "false" "$(echo "$T63_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Enhancement 1: Notes search scope
+# =========================================================================
+
+echo "--- Test 64: search scope=notes finds content in .notes.md files ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"search":{"query":"Dense planning","scope":"notes"}}}')
+TEXT=$(extract_text "$RESULT")
+T64_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+search = d.get('search', {})
+results = search.get('results', [])
+total = search.get('total', 0)
+ok = total > 0 and any('notes.md' in r for r in results)
+print('true' if ok else 'false|total=' + str(total) + ' results=' + str(results[:3]))
+" <<< "$TEXT")
+if [ "$(echo "$T64_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 64 "search scope=notes finds content in .notes.md" "true"
+else
+  report 64 "search scope=notes" "false" "$(echo "$T64_PASS" | cut -d'|' -f2-)"
+fi
+
+echo "--- Test 65: search scope=prose excludes .notes.md content ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"search":{"query":"Dense planning","scope":"prose"}}}')
+TEXT=$(extract_text "$RESULT")
+T65_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+search = d.get('search', {})
+results = search.get('results', [])
+# Should find nothing — 'Dense planning' only exists in .notes.md
+ok = len(results) == 0
+print('true' if ok else 'false|results=' + str(results[:3]))
+" <<< "$TEXT")
+if [ "$(echo "$T65_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 65 "search scope=prose excludes .notes.md content" "true"
+else
+  report 65 "search scope=prose excludes notes" "false" "$(echo "$T65_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Enhancement 2: Guide editing
+# =========================================================================
+
+echo "--- Test 66: write guide creates GUIDE.md ---"
+RESULT=$(mcp_call "write" '{"target":"guide","project":"_fractal-test","content":"# Writing Guide\n\nFollow these principles."}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 66 "write guide" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T66_PASS=$(python3 -c "
+content = open('$TEST_DIR/GUIDE.md').read()
+ok = '# Writing Guide' in content and 'principles' in content
+print('true' if ok else 'false|content=' + repr(content[:200]))
+")
+  if [ "$(echo "$T66_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 66 "write guide creates GUIDE.md" "true"
+  else
+    report 66 "write guide" "false" "$(echo "$T66_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 67: edit guide does surgical replacement ---"
+RESULT=$(mcp_call "edit" '{"target":"guide","project":"_fractal-test","edits":[{"old_str":"Follow these principles.","new_str":"Follow these core principles always."}]}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 67 "edit guide" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T67_PASS=$(python3 -c "
+content = open('$TEST_DIR/GUIDE.md').read()
+ok = 'core principles always' in content and 'Follow these principles.' not in content
+print('true' if ok else 'false|content=' + repr(content[:200]))
+")
+  if [ "$(echo "$T67_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 67 "edit guide does surgical replacement" "true"
+  else
+    report 67 "edit guide" "false" "$(echo "$T67_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 68: write guide with append preserves existing ---"
+RESULT=$(mcp_call "write" '{"target":"guide","project":"_fractal-test","content":"## Appendix\n\nAppended section.","append":true}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 68 "write guide append" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T68_PASS=$(python3 -c "
+content = open('$TEST_DIR/GUIDE.md').read()
+has_original = 'core principles always' in content
+has_appended = 'Appended section' in content
+ok = has_original and has_appended
+print('true' if ok else 'false|orig=' + str(has_original) + ' appended=' + str(has_appended))
+")
+  if [ "$(echo "$T68_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 68 "write guide append preserves existing + adds new" "true"
+  else
+    report 68 "write guide append" "false" "$(echo "$T68_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+# =========================================================================
+# Enhancement 3: Scratch archival
+# =========================================================================
+
+echo "--- Test 69: archive scratch items ---"
+RESULT=$(mcp_call "update" '{"target":"scratch","project":"_fractal-test","filenames":["test-scratch.md"],"archived":true}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 69 "archive scratch" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T69_PASS=$(python3 -c "
+import json
+idx = json.load(open('$TEST_DIR/scratch/scratch.json'))
+item = [i for i in idx['items'] if i['file'] == 'test-scratch.md']
+ok = len(item) == 1 and item[0].get('archived') == True
+print('true' if ok else 'false|item=' + str(item))
+")
+  # Also verify via get_context scratch_index enrichment
+  RESULT2=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"scratch_index":true}}')
+  TEXT2=$(extract_text "$RESULT2")
+  T69B_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+si = d.get('scratch_index', {})
+has_active = 'active_count' in si
+has_archived = 'archived_count' in si
+archived_gt_0 = si.get('archived_count', 0) > 0
+ok = has_active and has_archived and archived_gt_0
+print('true' if ok else 'false|active=' + str(si.get('active_count')) + ' archived=' + str(si.get('archived_count')))
+" <<< "$TEXT2")
+
+  if [ "$(echo "$T69_PASS" | cut -d'|' -f1)" = "true" ] && [ "$(echo "$T69B_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 69 "archive scratch items + enriched counts" "true"
+  else
+    report 69 "archive scratch" "false" "json=$(echo "$T69_PASS" | cut -d'|' -f2-) ctx=$(echo "$T69B_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 70: unarchive scratch items ---"
+RESULT=$(mcp_call "update" '{"target":"scratch","project":"_fractal-test","filenames":["test-scratch.md"],"archived":false}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 70 "unarchive scratch" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T70_PASS=$(python3 -c "
+import json
+idx = json.load(open('$TEST_DIR/scratch/scratch.json'))
+item = [i for i in idx['items'] if i['file'] == 'test-scratch.md']
+ok = len(item) == 1 and item[0].get('archived') == False
+print('true' if ok else 'false|item=' + str(item))
+")
+  if [ "$(echo "$T70_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 70 "unarchive scratch restores item" "true"
+  else
+    report 70 "unarchive scratch" "false" "$(echo "$T70_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 71: archive nonexistent scratch filename → error ---"
+RESULT=$(mcp_call "update" '{"target":"scratch","project":"_fractal-test","filenames":["nonexistent-file.md"]}')
+ERR=$(is_error "$RESULT")
+TEXT=$(extract_text "$RESULT")
+T71_PASS=$(python3 -c "
+import sys
+text = sys.stdin.read()
+ok = 'No scratch items found' in text or 'not found' in text.lower()
+print('true' if ok else 'false|response=' + repr(text[:300]))
+" <<< "$TEXT")
+if [ "$(echo "$T71_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 71 "archive nonexistent scratch filename → error" "true"
+else
+  report 71 "archive nonexistent scratch" "false" "$(echo "$T71_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Enhancement 4 & 5: Enriched canon list + canon archival
+# =========================================================================
+
+echo "--- Test 72: canon_list returns enriched objects (not bare strings) ---"
+# First, create a canon entry with meta
+mcp_call "write" '{"target":"canon","project":"_fractal-test","type":"characters","id":"test-char","content":"# Test Character\n\nA test character.","meta":{"id":"test-char","type":"character","role":"protagonist","appears_in":["part-01/chapter-01:b01","part-01/chapter-01:b02"],"last_updated":"2026-02-18T00:00:00Z"}}' > /dev/null
+
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon_list":"characters"}}')
+TEXT=$(extract_text "$RESULT")
+T72_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entries = d.get('canon_list', [])
+# Should be list of objects, not strings
+if not entries or not isinstance(entries[0], dict):
+    print('false|expected objects, got: ' + str(type(entries[0]) if entries else 'empty'))
+else:
+    test_entry = [e for e in entries if e.get('id') == 'test-char']
+    if not test_entry:
+        print('false|test-char not in list: ' + str([e.get('id') for e in entries]))
+    else:
+        e = test_entry[0]
+        has_role = e.get('role') == 'protagonist'
+        has_count = e.get('appears_in_count') == 2
+        ok = has_role and has_count
+        print('true' if ok else 'false|role=' + str(e.get('role')) + ' count=' + str(e.get('appears_in_count')))
+" <<< "$TEXT")
+if [ "$(echo "$T72_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 72 "canon_list returns enriched objects with role and appears_in_count" "true"
+else
+  report 72 "enriched canon_list" "false" "$(echo "$T72_PASS" | cut -d'|' -f2-)"
+fi
+
+echo "--- Test 73: archive canon entry → disappears from canon_list ---"
+RESULT=$(mcp_call "update" '{"target":"canon","project":"_fractal-test","type":"characters","id":"test-char","action":"archive"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 73 "archive canon entry" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  # Verify it's gone from canon_list
+  RESULT2=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon_list":"characters"}}')
+  TEXT2=$(extract_text "$RESULT2")
+  T73A_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entries = d.get('canon_list', [])
+ids = [e.get('id') if isinstance(e, dict) else e for e in entries]
+ok = 'test-char' not in ids
+print('true' if ok else 'false|test-char still in list: ' + str(ids))
+" <<< "$TEXT2")
+
+  # But verify it's still fetchable directly
+  RESULT3=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon":["test-char"]}}')
+  TEXT3=$(extract_text "$RESULT3")
+  T73B_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('canon', {}).get('test-char', {})
+content = entry.get('content', '')
+archived = entry.get('_archived', False)
+ok = '# Test Character' in content and archived == True
+print('true' if ok else 'false|content=' + repr(content[:100]) + ' archived=' + str(archived))
+" <<< "$TEXT3")
+
+  if [ "$(echo "$T73A_PASS" | cut -d'|' -f1)" = "true" ] && [ "$(echo "$T73B_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 73 "archive canon: removed from list but still fetchable with _archived flag" "true"
+  else
+    report 73 "archive canon" "false" "list=$(echo "$T73A_PASS" | cut -d'|' -f2-) fetch=$(echo "$T73B_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 74: unarchive canon entry → reappears in canon_list ---"
+RESULT=$(mcp_call "update" '{"target":"canon","project":"_fractal-test","type":"characters","id":"test-char","action":"unarchive"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 74 "unarchive canon" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  RESULT2=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"canon_list":"characters"}}')
+  TEXT2=$(extract_text "$RESULT2")
+  T74_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entries = d.get('canon_list', [])
+ids = [e.get('id') if isinstance(e, dict) else e for e in entries]
+ok = 'test-char' in ids
+print('true' if ok else 'false|ids=' + str(ids))
+" <<< "$TEXT2")
+  if [ "$(echo "$T74_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 74 "unarchive canon: reappears in canon_list" "true"
+  else
+    report 74 "unarchive canon" "false" "$(echo "$T74_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+# =========================================================================
+# Enhancement 6: Canon renaming
+# =========================================================================
+
+echo "--- Test 75: rename canon entry → old ID gone, new ID exists ---"
+RESULT=$(mcp_call "update" '{"target":"canon","project":"_fractal-test","type":"characters","id":"test-char","new_id":"test-character-renamed"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 75 "rename canon" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  TEXT=$(extract_text "$RESULT")
+  T75_PASS=$(python3 -c "
+import json, sys, os
+d = json.loads(sys.stdin.read())
+renamed = d.get('files_renamed', 0)
+# Verify old is gone, new exists
+old_exists = os.path.exists('$TEST_DIR/canon/characters/test-char.md')
+new_exists = os.path.exists('$TEST_DIR/canon/characters/test-character-renamed.md')
+ok = renamed > 0 and not old_exists and new_exists
+print('true' if ok else 'false|renamed=' + str(renamed) + ' old_exists=' + str(old_exists) + ' new_exists=' + str(new_exists))
+" <<< "$TEXT")
+  if [ "$(echo "$T75_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 75 "rename canon: old ID gone, new ID exists" "true"
+  else
+    report 75 "rename canon" "false" "$(echo "$T75_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 76: rename to existing ID → error (collision) ---"
+# Create another entry to collide with
+mcp_call "write" '{"target":"canon","project":"_fractal-test","type":"characters","id":"collision-target","content":"# Collision Target\n\nExists already."}' > /dev/null
+RESULT=$(mcp_call "update" '{"target":"canon","project":"_fractal-test","type":"characters","id":"test-character-renamed","new_id":"collision-target"}')
+ERR=$(is_error "$RESULT")
+TEXT=$(extract_text "$RESULT")
+T76_PASS=$(python3 -c "
+import sys
+text = sys.stdin.read()
+ok = 'already exists' in text.lower() or 'collision' in text.lower()
+print('true' if ok else 'false|response=' + repr(text[:300]))
+" <<< "$TEXT")
+if [ "$(echo "$T76_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 76 "rename to existing ID → error (collision)" "true"
+else
+  report 76 "rename collision" "false" "$(echo "$T76_PASS" | cut -d'|' -f2-)"
+fi
+
+# =========================================================================
+# Enhancement 7: Batch beat status updates
+# =========================================================================
+
+echo "--- Test 77: batch update beats across chapters ---"
+# Reset b01 in chapter-01 and chapter-02 to planned first
+mcp_call "update" '{"target":"chapter","project":"_fractal-test","part_id":"part-01","chapter_id":"chapter-01","patch":{"beats":[{"id":"b01","status":"planned"},{"id":"b02","status":"planned"}]}}' > /dev/null
+
+RESULT=$(mcp_call "update" '{"target":"beats","project":"_fractal-test","beat_refs":["part-01/chapter-01:b01","part-01/chapter-01:b02","part-01/chapter-02:b01"],"patch":{"status":"written"}}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 77 "batch update beats" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  TEXT=$(extract_text "$RESULT")
+  T77_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+beats_updated = d.get('beats_updated', 0)
+chapters_touched = d.get('chapters_touched', 0)
+ok = beats_updated == 3 and chapters_touched == 2
+print('true' if ok else 'false|beats=' + str(beats_updated) + ' chapters=' + str(chapters_touched))
+" <<< "$TEXT")
+
+  # Verify on disk
+  T77_DISK=$(python3 -c "
+md1 = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+md2 = open('$TEST_DIR/parts/part-01/chapter-02.md').read()
+b01_written = '<!-- beat:b01 [written]' in md1
+b02_written = '<!-- beat:b02 [written]' in md1
+c2_b01_written = '<!-- beat:b01 [written]' in md2
+ok = b01_written and b02_written and c2_b01_written
+print('true' if ok else 'false|b01=' + str(b01_written) + ' b02=' + str(b02_written) + ' c2_b01=' + str(c2_b01_written))
+")
+
+  if [ "$(echo "$T77_PASS" | cut -d'|' -f1)" = "true" ] && [ "$(echo "$T77_DISK" | cut -d'|' -f1)" = "true" ]; then
+    report 77 "batch update beats across chapters" "true"
+  else
+    report 77 "batch update beats" "false" "api=$(echo "$T77_PASS" | cut -d'|' -f2-) disk=$(echo "$T77_DISK" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 78: batch update beats with dirty_reason ---"
+RESULT=$(mcp_call "update" '{"target":"beats","project":"_fractal-test","beat_refs":["part-01/chapter-01:b01"],"patch":{"status":"dirty","dirty_reason":"canon revised"}}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 78 "batch update beats dirty_reason" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T78_PASS=$(python3 -c "
+import json
+md = open('$TEST_DIR/parts/part-01/chapter-01.md').read()
+meta = json.load(open('$TEST_DIR/parts/part-01/chapter-01.meta.json'))
+has_dirty = '<!-- beat:b01 [dirty]' in md
+beat_meta = [b for b in meta.get('beats', []) if b['id'] == 'b01']
+has_reason = len(beat_meta) > 0 and beat_meta[0].get('dirty_reason') == 'canon revised'
+ok = has_dirty and has_reason
+print('true' if ok else 'false|dirty=' + str(has_dirty) + ' reason=' + str(has_reason))
+")
+  if [ "$(echo "$T78_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 78 "batch update beats with dirty_reason" "true"
+  else
+    report 78 "batch update beats dirty_reason" "false" "$(echo "$T78_PASS" | cut -d'|' -f2-)"
+  fi
 fi
 
 # =========================================================================

@@ -694,9 +694,9 @@ Returns any combination of project data in one call via the `include` object:
 - `scratch_index` — scratch folder index
 - `dirty_nodes` — all nodes flagged dirty/conflict
 - `redlines` — inline redlines with scope/type/author filters
-- `canon_list` — list canon types (boolean) or entries within a type (string)
+- `canon_list` — list canon types (boolean) or entries within a type (string). When listing entries, returns enriched objects: `{id, role?, appears_in_count?, last_updated?}`. Archived/deprecated entries are excluded by default.
 - `guide` — GUIDE.md content
-- `search` — `{query, scope?}` full-text search across prose, canon, scratch (replaces the old standalone `search` tool)
+- `search` — `{query, scope?}` full-text search across prose, canon, scratch, notes. Scopes: `"prose"` (excludes .notes.md), `"canon"`, `"scratch"`, `"notes"` (only .notes.md). Unscoped searches everything.
 
 ### `create` — Create any object (target discriminator)
 - `create(target="project", project, title, template?)` → bootstrap a new project with directories, starter files, git init
@@ -711,17 +711,23 @@ Returns any combination of project data in one call via the `include` object:
 - `update(target="part", project, part_id, patch)` → update part summary/arc/status
 - `update(target="chapter", project, part_id, chapter_id, patch)` → update beat summaries, status, deps
 - `update(target="node", project, node_ref, mark, reason?)` → set dirty/clean status on a node
+- `update(target="scratch", project, filenames, archived?)` → archive/unarchive scratch items by filename
+- `update(target="beats", project, beat_refs, patch)` → batch update beat status/dirty_reason across chapters. `beat_refs` format: `["part-01/chapter-01:b01", "part-05/chapter-03:b04"]`
+- `update(target="canon", project, type, id, action?)` → archive/unarchive canon entries (`action: "archive"|"unarchive"`)
+- `update(target="canon", project, type, id, new_id)` → rename canon entry (updates references in chapter meta files)
 
 ### `write` — Write or replace content (target discriminator)
 - `write(target="beat", project, part_id, chapter_id, beat_id, content, append?)` → insert/replace prose for a beat
 - `write(target="beat", project, part_id, chapter_id, beat_id, source_scratch)` → promote scratch content into a beat
 - `write(target="canon", project, type, id, content, meta?)` → write canon entry markdown (replaces entire file)
 - `write(target="scratch", project, filename, content, append?)` → write to an existing scratch file (overwrite or append)
+- `write(target="guide", project, content, append?)` → write or append to GUIDE.md at project root
 
 ### `edit` — Surgical string replacements (target discriminator)
 - `edit(target="beat", project, part_id, chapter_id, beat_id, edits, variant_index?)` → find/replace within a beat's prose
 - `edit(target="canon", project, type, id, edits)` → find/replace within a canon entry
 - `edit(target="scratch", project, filename, edits)` → find/replace within a scratch file
+- `edit(target="guide", project, edits)` → find/replace within GUIDE.md
 
 ### `remove` — Delete objects (target discriminator)
 - `remove(target="beat", project, part_id, chapter_id, beat_id)` → remove a beat (prose moves to scratch)
@@ -745,7 +751,7 @@ Returns any combination of project data in one call via the `include` object:
 
 ### Text-Blob Parity Principle
 
-All text-blob targets (beat, canon, part_notes, chapter_notes, scratch) support the same three operations:
+All text-blob targets (beat, canon, part_notes, chapter_notes, scratch, guide) support the same three operations:
 1. **Read** via `get_context` — with section-level lazy loading (topMatter + sections TOC, `#` notation for individual sections)
 2. **Write** via `write` — full overwrite + append mode
 3. **Edit** via `edit` — surgical find/replace with atomic ordered edits

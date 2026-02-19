@@ -1209,6 +1209,58 @@ export async function editChapterNotes(
 }
 
 // ---------------------------------------------------------------------------
+// Guide write / edit
+// ---------------------------------------------------------------------------
+
+/**
+ * Write (or append to) the project's GUIDE.md file.
+ * Creates the file if it doesn't exist.
+ */
+export async function writeGuide(projectId: string, content: string, append: boolean = false): Promise<WriteResult> {
+  const guidePath = join(projectRoot(projectId), "GUIDE.md");
+  if (append) {
+    const existing = existsSync(guidePath) ? await readMd(guidePath) : "";
+    await writeMd(guidePath, existing + "\n\n" + content);
+  } else {
+    await writeMd(guidePath, content);
+  }
+  return {
+    path: guidePath,
+    description: `${append ? "Appended to" : "Updated"} GUIDE.md`,
+  };
+}
+
+/**
+ * Surgical find/replace editing on the project's GUIDE.md file.
+ */
+export async function editGuide(
+  projectId: string,
+  edits: { old_str: string; new_str: string }[]
+): Promise<{
+  result: WriteResult;
+  edits_applied: number;
+  changes: { old_str: string; new_str: string; context: string }[];
+}> {
+  const guidePath = join(projectRoot(projectId), "GUIDE.md");
+  const ref = "GUIDE.md";
+
+  if (edits.length === 0) {
+    return { result: { path: guidePath, description: `No edits applied to ${ref}` }, edits_applied: 0, changes: [] };
+  }
+
+  if (!existsSync(guidePath)) throw new Error(`GUIDE.md not found for this project`);
+  const raw = await readMd(guidePath);
+  const { text, changes } = applyEdits(raw, edits, ref);
+  await writeMd(guidePath, text);
+
+  return {
+    result: { path: guidePath, description: `Applied ${edits.length} edit(s) to ${ref}` },
+    edits_applied: edits.length,
+    changes,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Scratch write / edit
 // ---------------------------------------------------------------------------
 
@@ -1328,7 +1380,7 @@ export async function getCanon(projectId: string, type: string, id: string): Pro
   return { content, meta };
 }
 
-export async function listCanon(projectId: string, type: string): Promise<string[]> {
+export async function listCanon(projectId: string, type: string, includeArchived: boolean = false): Promise<string[]> {
   validateSegment(type, "canon type");
   const dir = join(projectRoot(projectId), "canon", type);
   if (!existsSync(dir)) return [];
@@ -1337,10 +1389,29 @@ export async function listCanon(projectId: string, type: string): Promise<string
   for (const entry of entries) {
     if (shouldIgnore(entry.name) || entry.name.startsWith(".")) continue;
     if (entry.isFile() && entry.name.endsWith(".md") && !entry.name.endsWith(".meta.json")) {
-      ids.push(entry.name.replace(/\.md$/, ""));
+      const id = entry.name.replace(/\.md$/, "");
+      if (!includeArchived) {
+        const paths = resolveCanonPaths(dir, id);
+        if (paths && existsSync(paths.metaPath)) {
+          try {
+            const meta = await readJson<Record<string, unknown>>(paths.metaPath);
+            if (meta.role === "archived" || meta.role === "deprecated") continue;
+          } catch { /* include on read error */ }
+        }
+      }
+      ids.push(id);
     } else if (entry.isDirectory()) {
       // Directory format: check for brief.md inside
       if (existsSync(join(dir, entry.name, "brief.md"))) {
+        if (!includeArchived) {
+          const paths = resolveCanonPaths(dir, entry.name);
+          if (paths && existsSync(paths.metaPath)) {
+            try {
+              const meta = await readJson<Record<string, unknown>>(paths.metaPath);
+              if (meta.role === "archived" || meta.role === "deprecated") continue;
+            } catch { /* include on read error */ }
+          }
+        }
         ids.push(entry.name);
       }
     }
@@ -1362,6 +1433,211 @@ export async function listCanonTypes(projectId: string): Promise<string[]> {
     .sort();
 }
 
+
+/**
+ * List canon entries with enriched metadata from their meta.json sidecars.
+ * Returns { id, role?, appears_in_count?, last_updated? } for each entry.
+ */
+export async function listCanonEnriched(
+  projectId: string,
+  type: string,
+  includeArchived: boolean = false
+): Promise<Array<{ id: string; role?: string; appears_in_count?: number; last_updated?: string }>> {
+  const ids = await listCanon(projectId, type, includeArchived);
+  const dir = join(projectRoot(projectId), "canon", type);
+  const result: Array<{ id: string; role?: string; appears_in_count?: number; last_updated?: string }> = [];
+
+  for (const id of ids) {
+    const paths = resolveCanonPaths(dir, id);
+    if (!paths) {
+      result.push({ id });
+      continue;
+    }
+    if (!existsSync(paths.metaPath)) {
+      result.push({ id });
+      continue;
+    }
+    try {
+      const meta = await readJson<Record<string, unknown>>(paths.metaPath);
+      const entry: { id: string; role?: string; appears_in_count?: number; last_updated?: string } = { id };
+      if (meta.role && typeof meta.role === "string") entry.role = meta.role;
+      if (Array.isArray(meta.appears_in)) entry.appears_in_count = meta.appears_in.length;
+      if (meta.last_updated && typeof meta.last_updated === "string") entry.last_updated = meta.last_updated;
+      result.push(entry);
+    } catch {
+      result.push({ id });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Archive or unarchive a canon entry by setting its role to "archived".
+ */
+export async function archiveCanon(
+  projectId: string,
+  type: string,
+  id: string,
+  archive: boolean = true
+): Promise<WriteResult> {
+  validateSegment(type, "canon type");
+  validateSegment(id, "canon id");
+  const dir = join(projectRoot(projectId), "canon", type);
+  const paths = resolveCanonPaths(dir, id);
+  if (!paths) {
+    throw new Error(`Canon entry "${type}/${id}" not found`);
+  }
+  const metaPath = paths.metaPath;
+
+  let meta: Record<string, unknown> = {};
+  if (existsSync(metaPath)) {
+    meta = await readJson<Record<string, unknown>>(metaPath);
+  }
+
+  if (archive) {
+    meta.role = "archived";
+    meta.appears_in = [];
+  } else {
+    // Unarchive: clear archived role
+    if (meta.role === "archived" || meta.role === "deprecated") {
+      delete meta.role;
+    }
+  }
+
+  await writeJson(metaPath, meta);
+  return {
+    path: metaPath,
+    description: `${archive ? "Archived" : "Unarchived"} canon entry ${type}/${id}`,
+  };
+}
+
+/**
+ * Rename a canon entry, updating all references in chapter meta files.
+ */
+export async function renameCanon(
+  projectId: string,
+  type: string,
+  oldId: string,
+  newId: string
+): Promise<{ files: WriteResult[]; files_renamed: number; references_updated: number }> {
+  validateSegment(type, "canon type");
+  validateSegment(oldId, "old canon id");
+  validateSegment(newId, "new canon id");
+
+  const root = projectRoot(projectId);
+  const basePath = join(root, "canon", type);
+  const files: WriteResult[] = [];
+
+  // Check old entry exists
+  const oldPaths = resolveCanonPaths(basePath, oldId);
+  if (!oldPaths) {
+    throw new Error(`Canon entry "${type}/${oldId}" not found`);
+  }
+
+  // Check new ID doesn't collide
+  const newPaths = resolveCanonPaths(basePath, newId);
+  if (newPaths) {
+    throw new Error(`Canon entry "${type}/${newId}" already exists — cannot rename to an existing entry`);
+  }
+
+  // Determine if flat or directory format
+  const isDir = oldPaths.mdPath.endsWith("brief.md");
+  let filesRenamed = 0;
+
+  if (isDir) {
+    // Directory format: rename the directory
+    const oldDir = join(basePath, oldId);
+    const newDir = join(basePath, newId);
+    await rename(oldDir, newDir);
+    filesRenamed++;
+    files.push({ path: newDir, description: `Renamed directory ${type}/${oldId}/ → ${type}/${newId}/` });
+
+    // Update id field in meta.json if it exists
+    const newMetaPath = join(newDir, "meta.json");
+    if (existsSync(newMetaPath)) {
+      const meta = await readJson<Record<string, unknown>>(newMetaPath);
+      meta.id = newId;
+      await writeJson(newMetaPath, meta);
+    }
+  } else {
+    // Flat format: rename .md and .meta.json
+    const newMdPath = join(basePath, `${newId}.md`);
+    await rename(oldPaths.mdPath, newMdPath);
+    filesRenamed++;
+    files.push({ path: newMdPath, description: `Renamed ${type}/${oldId}.md → ${type}/${newId}.md` });
+
+    const oldMetaPath = oldPaths.metaPath;
+    const newMetaPath = join(basePath, `${newId}.meta.json`);
+    if (existsSync(oldMetaPath)) {
+      // Update id field in meta
+      const meta = await readJson<Record<string, unknown>>(oldMetaPath);
+      meta.id = newId;
+      await writeJson(oldMetaPath, meta);
+      await rename(oldMetaPath, newMetaPath);
+      filesRenamed++;
+      files.push({ path: newMetaPath, description: `Renamed ${type}/${oldId}.meta.json → ${type}/${newId}.meta.json` });
+    }
+  }
+
+  // Scan chapter meta files for references and update them
+  let referencesUpdated = 0;
+  const partsDir = join(root, "parts");
+  if (existsSync(partsDir)) {
+    const partEntries = await readdir(partsDir, { withFileTypes: true });
+    for (const partEntry of partEntries) {
+      if (!partEntry.isDirectory() || partEntry.name.startsWith(".") || shouldIgnore(partEntry.name)) continue;
+      const partDir = join(partsDir, partEntry.name);
+      const chapterFiles = await readdir(partDir);
+      for (const file of chapterFiles) {
+        if (!file.endsWith(".meta.json")) continue;
+        const metaPath = join(partDir, file);
+        try {
+          const raw = await readFile(metaPath, "utf-8");
+          const meta = JSON.parse(raw) as Record<string, unknown>;
+          let changed = false;
+
+          // Check pov
+          if (meta.pov === oldId) {
+            meta.pov = newId;
+            changed = true;
+            referencesUpdated++;
+          }
+
+          // Check location
+          if (meta.location === oldId) {
+            meta.location = newId;
+            changed = true;
+            referencesUpdated++;
+          }
+
+          // Check beat characters
+          const beats = meta.beats as Array<Record<string, unknown>> | undefined;
+          if (beats) {
+            for (const beat of beats) {
+              const chars = beat.characters as string[] | undefined;
+              if (chars) {
+                const idx = chars.indexOf(oldId);
+                if (idx !== -1) {
+                  chars[idx] = newId;
+                  changed = true;
+                  referencesUpdated++;
+                }
+              }
+            }
+          }
+
+          if (changed) {
+            await writeJson(metaPath, meta);
+            files.push({ path: metaPath, description: `Updated references in ${partEntry.name}/${file}` });
+          }
+        } catch { /* skip unreadable meta files */ }
+      }
+    }
+  }
+
+  return { files, files_renamed: filesRenamed, references_updated: referencesUpdated };
+}
 
 // ---------------------------------------------------------------------------
 // Canon section parsing — lazy-load sections by slug
@@ -1428,7 +1704,7 @@ export function splitMarkdownSections(markdown: string, headerLevel: number = 2)
 async function resolveCanon(
   projectId: string,
   id: string
-): Promise<{ content: string; meta: unknown; type: string; sections: Array<{ name: string; id: string }> } | null> {
+): Promise<{ content: string; meta: unknown; type: string; sections: Array<{ name: string; id: string }>; _archived?: boolean } | null> {
   const entry = await findCanonEntry(projectId, id);
   if (!entry) return null;
 
@@ -1440,7 +1716,15 @@ async function resolveCanon(
   const parsed = splitMarkdownSections(rawContent);
   const content = parsed.sections.length > 0 ? parsed.topMatter : rawContent;
   const sections = parsed.sections.map(s => ({ name: s.name, id: s.id }));
-  return { content, meta, type: entry.type, sections };
+  const result: { content: string; meta: unknown; type: string; sections: Array<{ name: string; id: string }>; _archived?: boolean } = { content, meta, type: entry.type, sections };
+  // Flag archived entries so agents know
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    const role = (meta as Record<string, unknown>).role;
+    if (role === "archived" || role === "deprecated") {
+      result._archived = true;
+    }
+  }
+  return result;
 }
 
 async function getCanonSection(
@@ -1470,7 +1754,7 @@ function parseChapterRef(ref: string): { partId: string; chapterId: string } {
   return { partId: parts[0], chapterId: parts[1] };
 }
 
-function parseBeatRef(ref: string): { partId: string; chapterId: string; beatId: string } {
+export function parseBeatRef(ref: string): { partId: string; chapterId: string; beatId: string } {
   const parts = ref.split("/");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
     throw new Error(`Invalid beat ref "${ref}". Expected format: "part-01/chapter-01:b01"`);
@@ -1493,6 +1777,7 @@ export interface ScratchItem {
   mood: string;
   potential_placement: string | null;
   created: string;
+  archived?: boolean;
 }
 
 export interface ScratchIndex {
@@ -1501,6 +1786,37 @@ export interface ScratchIndex {
 
 export async function getScratchIndex(projectId: string): Promise<ScratchIndex> {
   return readJson<ScratchIndex>(join(projectRoot(projectId), "scratch", "scratch.json"));
+}
+
+/**
+ * Archive (or unarchive) scratch items by filename.
+ */
+export async function archiveScratch(
+  projectId: string,
+  filenames: string[],
+  archived: boolean = true
+): Promise<WriteResult> {
+  const root = projectRoot(projectId);
+  const indexPath = join(root, "scratch", "scratch.json");
+  const index = await readJson<ScratchIndex>(indexPath);
+
+  let matched = 0;
+  for (const item of index.items) {
+    if (filenames.includes(item.file)) {
+      item.archived = archived;
+      matched++;
+    }
+  }
+
+  if (matched === 0) {
+    throw new Error(`No scratch items found matching: ${filenames.join(", ")}`);
+  }
+
+  await writeJson(indexPath, index);
+  return {
+    path: indexPath,
+    description: `${archived ? "Archived" : "Unarchived"} ${matched} scratch item(s)`,
+  };
 }
 
 export async function getScratch(projectId: string, filename: string): Promise<string> {
@@ -1534,21 +1850,22 @@ export async function getScratchSection(
 export async function search(
   projectId: string,
   query: string,
-  scope?: "prose" | "canon" | "scratch"
+  scope?: "prose" | "canon" | "scratch" | "notes"
 ): Promise<{ file: string; line: number; text: string }[]> {
   const results: { file: string; line: number; text: string }[] = [];
   const queryLower = query.toLowerCase();
   const root = projectRoot(projectId);
 
-  async function searchDir(dir: string, prefix: string) {
+  async function searchDir(dir: string, prefix: string, fileFilter?: (name: string) => boolean) {
     if (!existsSync(dir)) return;
     const entries = await readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       if (shouldIgnore(entry.name)) continue;
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
-        await searchDir(fullPath, `${prefix}${entry.name}/`);
+        await searchDir(fullPath, `${prefix}${entry.name}/`, fileFilter);
       } else if (entry.name.endsWith(".md")) {
+        if (fileFilter && !fileFilter(entry.name)) continue;
         const content = await readFile(fullPath, "utf-8");
         const lines = content.split("\n");
         for (let i = 0; i < lines.length; i++) {
@@ -1564,13 +1881,18 @@ export async function search(
     }
   }
 
-  if (!scope || scope === "prose") {
+  if (!scope) {
+    // Unscoped: scan all directories, all .md files (including notes)
     await searchDir(join(root, "parts"), "parts/");
-  }
-  if (!scope || scope === "canon") {
     await searchDir(join(root, "canon"), "canon/");
-  }
-  if (!scope || scope === "scratch") {
+    await searchDir(join(root, "scratch"), "scratch/");
+  } else if (scope === "prose") {
+    await searchDir(join(root, "parts"), "parts/", name => !name.endsWith(".notes.md"));
+  } else if (scope === "notes") {
+    await searchDir(join(root, "parts"), "parts/", name => name.endsWith(".notes.md"));
+  } else if (scope === "canon") {
+    await searchDir(join(root, "canon"), "canon/");
+  } else if (scope === "scratch") {
     await searchDir(join(root, "scratch"), "scratch/");
   }
 
@@ -2821,22 +3143,25 @@ export async function getContext(
     }
   }
 
-  // Scratch index
+  // Scratch index — enriched with active/archived counts
   if (include.scratch_index) {
     try {
-      response.scratch_index = await getScratchIndex(projectId);
+      const index = await getScratchIndex(projectId);
+      const archivedCount = index.items.filter(i => i.archived).length;
+      const activeCount = index.items.length - archivedCount;
+      response.scratch_index = { ...index, active_count: activeCount, archived_count: archivedCount };
     } catch (err) {
       errors["scratch_index"] = err instanceof Error ? err.message : String(err);
     }
   }
 
-  // Canon list — true for type listing, string for entries within a type
+  // Canon list — true for type listing, string for entries within a type (enriched with metadata)
   if (include.canon_list !== undefined && include.canon_list !== false) {
     try {
       if (include.canon_list === true) {
         response.canon_list = await listCanonTypes(projectId);
       } else {
-        response.canon_list = await listCanon(projectId, include.canon_list);
+        response.canon_list = await listCanonEnriched(projectId, include.canon_list);
       }
     } catch (err) {
       errors["canon_list"] = err instanceof Error ? err.message : String(err);
