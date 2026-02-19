@@ -1209,6 +1209,67 @@ export async function editChapterNotes(
 }
 
 // ---------------------------------------------------------------------------
+// Scratch write / edit
+// ---------------------------------------------------------------------------
+
+/**
+ * Write (or append) to an existing scratch file.
+ * Does NOT touch scratch.json — that's addScratch's job via create.
+ */
+export async function writeScratch(
+  projectId: string,
+  filename: string,
+  content: string,
+  append: boolean = false
+): Promise<WriteResult> {
+  validateSegment(filename, "filename");
+  const scratchPath = join(projectRoot(projectId), "scratch", filename);
+  if (!existsSync(scratchPath)) throw new Error(`Scratch file not found: scratch/${filename}`);
+  if (append) {
+    const existing = await readMd(scratchPath);
+    await writeMd(scratchPath, existing + "\n\n" + content);
+  } else {
+    await writeMd(scratchPath, content);
+  }
+  return {
+    path: scratchPath,
+    description: `${append ? "Appended to" : "Updated"} scratch/${filename}`,
+  };
+}
+
+/**
+ * Surgical find/replace editing on an existing scratch file.
+ */
+export async function editScratch(
+  projectId: string,
+  filename: string,
+  edits: { old_str: string; new_str: string }[]
+): Promise<{
+  result: WriteResult;
+  edits_applied: number;
+  changes: { old_str: string; new_str: string; context: string }[];
+}> {
+  validateSegment(filename, "filename");
+  const scratchPath = join(projectRoot(projectId), "scratch", filename);
+  const ref = `scratch/${filename}`;
+
+  if (edits.length === 0) {
+    return { result: { path: scratchPath, description: `No edits applied to ${ref}` }, edits_applied: 0, changes: [] };
+  }
+
+  if (!existsSync(scratchPath)) throw new Error(`Scratch file not found: ${ref}`);
+  const raw = await readMd(scratchPath);
+  const { text, changes } = applyEdits(raw, edits, ref);
+  await writeMd(scratchPath, text);
+
+  return {
+    result: { path: scratchPath, description: `Applied ${edits.length} edit(s) to ${ref}` },
+    edits_applied: edits.length,
+    changes,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Canon path resolution — shared by getCanon, editCanon, updateCanon, etc.
 // ---------------------------------------------------------------------------
 
@@ -1445,6 +1506,25 @@ export async function getScratchIndex(projectId: string): Promise<ScratchIndex> 
 export async function getScratch(projectId: string, filename: string): Promise<string> {
   validateSegment(filename, "filename");
   return readMd(join(projectRoot(projectId), "scratch", filename));
+}
+
+/**
+ * Resolve a single h1 section from a scratch file by slug.
+ */
+export async function getScratchSection(
+  projectId: string,
+  filename: string,
+  sectionId: string
+): Promise<string> {
+  const raw = await getScratch(projectId, filename);
+  if (!raw) throw new Error(`Scratch file not found: scratch/${filename}`);
+  const parsed = splitMarkdownSections(raw, 1);
+  const section = parsed.sections.find(s => s.id === sectionId);
+  if (!section) {
+    const available = parsed.sections.map(s => s.id).join(", ");
+    throw new Error(`Section '${sectionId}' not found in scratch/${filename}. Available: ${available || "(none)"}`);
+  }
+  return section.content;
 }
 
 // ---------------------------------------------------------------------------
@@ -2618,9 +2698,34 @@ export async function getContext(
     if (Object.keys(canon).length > 0) response.canon = canon;
   }
 
-  // Scratch files
+  // Scratch files — supports # for section-level lazy loading
   if (include.scratch?.length) {
-    await fetchAll(include.scratch, (f) => getScratch(projectId, f), "scratch");
+    const scratch: Record<string, unknown> = {};
+    await Promise.all(include.scratch.map(async (ref) => {
+      try {
+        const hashIdx = ref.indexOf("#");
+        if (hashIdx !== -1) {
+          const filename = ref.slice(0, hashIdx);
+          const sectionId = ref.slice(hashIdx + 1);
+          scratch[ref] = { content: await getScratchSection(projectId, filename, sectionId) };
+          return;
+        }
+        const raw = await getScratch(projectId, ref);
+        const parsed = splitMarkdownSections(raw, 1);
+        if (parsed.sections.length > 0) {
+          scratch[ref] = {
+            topMatter: parsed.topMatter,
+            sections: parsed.sections.map(s => ({ name: s.name, id: s.id, fetch: `${ref}#${s.id}` })),
+            _hint: `Only top-matter is shown. To fetch a section, include '${ref}#<section-id>' in the scratch array.`,
+          };
+        } else {
+          scratch[ref] = raw;
+        }
+      } catch (err) {
+        errors[`scratch:${ref}`] = err instanceof Error ? err.message : String(err);
+      }
+    }));
+    if (Object.keys(scratch).length > 0) response.scratch = scratch;
   }
 
   // Parts

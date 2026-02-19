@@ -30,6 +30,7 @@ bash test-templates.sh                 # all tests must pass
 - Read existing code before modifying it.
 - Check canon files before writing prose that references characters or locations.
 - When adding MCP tools: update the `/help` endpoint, add tests to `test-templates.sh`, update ARCHITECTURE.md tool list.
+- **Text-blob parity:** Every text-blob type (beat, canon, part_notes, chapter_notes, scratch) must support: get_context read (with section-level lazy loading), write (overwrite + append), and edit (surgical find-replace). When adding a new blob type, implement all three.
 
 ## Architecture Reference
 

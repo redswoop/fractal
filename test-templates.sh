@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fractal MCP feature test suite
-# Runs 55 tests against the Fractal MCP server on localhost:3001
+# Runs 63 tests against the Fractal MCP server on localhost:3001
 # Tests the 12 consolidated tools (down from 28)
 
 set -euo pipefail
@@ -1469,6 +1469,146 @@ else:
   else
     report 56 "fetch note section via #" "false" "$(echo "$T56_PASS" | cut -d'|' -f2-)"
   fi
+fi
+
+# =========================================================================
+# Scratch write / edit / append / section tests
+# =========================================================================
+
+echo "--- Test 57: create scratch file for subsequent tests ---"
+RESULT=$(mcp_call "create" '{"target":"scratch","project":"_fractal-test","filename":"test-scratch.md","content":"# Scratch Title\n\nTop matter paragraph.\n\n# Scene Draft\n\nThe rain came down hard.\n\n# Parking Lot\n\n- Research needed\n","note":"Test scratch file","characters":["unit-7"],"mood":"experimental"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 57 "create scratch file" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  if [ -f "$TEST_DIR/scratch/test-scratch.md" ]; then
+    report 57 "create scratch file" "true"
+  else
+    report 57 "create scratch file" "false" "File not on disk"
+  fi
+fi
+
+echo "--- Test 58: write scratch overwrite ---"
+RESULT=$(mcp_call "write" '{"target":"scratch","project":"_fractal-test","filename":"test-scratch.md","content":"# Scratch Title\n\nOverwritten content.\n\n# Scene Draft\n\nNew scene text here.\n\n# Parking Lot\n\n- Still need research\n"}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 58 "write scratch overwrite" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T58_PASS=$(python3 -c "
+content = open('$TEST_DIR/scratch/test-scratch.md').read()
+has_new = 'Overwritten content' in content
+no_old = 'Top matter paragraph' not in content
+print('true' if has_new and no_old else 'false|new=' + str(has_new) + ' no_old=' + str(no_old))
+")
+  if [ "$(echo "$T58_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 58 "write scratch overwrite replaces content" "true"
+  else
+    report 58 "write scratch overwrite" "false" "$(echo "$T58_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 59: write scratch append ---"
+RESULT=$(mcp_call "write" '{"target":"scratch","project":"_fractal-test","filename":"test-scratch.md","content":"# Appended Section\n\nThis was appended.","append":true}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 59 "write scratch append" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  T59_PASS=$(python3 -c "
+content = open('$TEST_DIR/scratch/test-scratch.md').read()
+has_original = 'Overwritten content' in content
+has_appended = 'This was appended' in content
+print('true' if has_original and has_appended else 'false|orig=' + str(has_original) + ' appended=' + str(has_appended))
+")
+  if [ "$(echo "$T59_PASS" | cut -d'|' -f1)" = "true" ]; then
+    report 59 "write scratch append preserves existing + adds new" "true"
+  else
+    report 59 "write scratch append" "false" "$(echo "$T59_PASS" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 60: edit scratch surgical find-replace ---"
+RESULT=$(mcp_call "edit" '{"target":"scratch","project":"_fractal-test","filename":"test-scratch.md","edits":[{"old_str":"New scene text here.","new_str":"Revised scene text with more detail."}]}')
+ERR=$(is_error "$RESULT")
+if [ "$ERR" = "true" ]; then
+  report 60 "edit scratch" "false" "Tool error: $(extract_text "$RESULT")"
+else
+  TEXT=$(extract_text "$RESULT")
+  T60_API=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+ok = d.get('edits_applied') == 1
+print('true' if ok else 'false|edits_applied=' + str(d.get('edits_applied')))
+" <<< "$TEXT")
+
+  T60_DISK=$(python3 -c "
+content = open('$TEST_DIR/scratch/test-scratch.md').read()
+ok = 'Revised scene text with more detail' in content and 'New scene text here' not in content
+print('true' if ok else 'false|content mismatch')
+")
+
+  if [ "$(echo "$T60_API" | cut -d'|' -f1)" = "true" ] && [ "$(echo "$T60_DISK" | cut -d'|' -f1)" = "true" ]; then
+    report 60 "edit scratch surgical find-replace" "true"
+  else
+    report 60 "edit scratch" "false" "api=$(echo "$T60_API" | cut -d'|' -f2-) disk=$(echo "$T60_DISK" | cut -d'|' -f2-)"
+  fi
+fi
+
+echo "--- Test 61: get_context scratch with # section notation ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"scratch":["test-scratch.md#scene-draft"]}}')
+TEXT=$(extract_text "$RESULT")
+T61_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('scratch', {}).get('test-scratch.md#scene-draft', {})
+content = entry.get('content', '')
+has_scene = 'Revised scene text' in content
+no_other = 'Parking Lot' not in content and 'Scratch Title' not in content
+ok = has_scene and no_other
+print('true' if ok else 'false|content=' + repr(content[:200]))
+" <<< "$TEXT")
+if [ "$(echo "$T61_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 61 "get_context scratch # section notation returns specific section" "true"
+else
+  report 61 "get_context scratch # section" "false" "$(echo "$T61_PASS" | cut -d'|' -f2-)"
+fi
+
+echo "--- Test 62: get_context scratch returns sections TOC ---"
+RESULT=$(mcp_call "get_context" '{"project":"_fractal-test","include":{"scratch":["test-scratch.md"]}}')
+TEXT=$(extract_text "$RESULT")
+T62_PASS=$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+entry = d.get('scratch', {}).get('test-scratch.md', {})
+if not isinstance(entry, dict) or 'sections' not in entry:
+    print('false|expected structured with sections, got: ' + str(type(entry).__name__))
+else:
+    sections = entry.get('sections', [])
+    ids = [s['id'] for s in sections]
+    has_hint = '_hint' in entry
+    has_top = 'topMatter' in entry
+    ok = len(sections) >= 3 and 'scene-draft' in ids and has_hint and has_top
+    print('true' if ok else 'false|ids=' + str(ids) + ' hint=' + str(has_hint) + ' top=' + str(has_top))
+" <<< "$TEXT")
+if [ "$(echo "$T62_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 62 "get_context scratch returns sections TOC with lazy-loading" "true"
+else
+  report 62 "get_context scratch sections TOC" "false" "$(echo "$T62_PASS" | cut -d'|' -f2-)"
+fi
+
+echo "--- Test 63: edit nonexistent scratch file returns error ---"
+RESULT=$(mcp_call "edit" '{"target":"scratch","project":"_fractal-test","filename":"nonexistent.md","edits":[{"old_str":"foo","new_str":"bar"}]}')
+ERR=$(is_error "$RESULT")
+TEXT=$(extract_text "$RESULT")
+T63_PASS=$(python3 -c "
+import sys
+text = sys.stdin.read()
+ok = 'not found' in text.lower() or 'Scratch file not found' in text
+print('true' if ok else 'false|response=' + repr(text[:300]))
+" <<< "$TEXT")
+if [ "$(echo "$T63_PASS" | cut -d'|' -f1)" = "true" ]; then
+  report 63 "edit nonexistent scratch file returns error" "true"
+else
+  report 63 "edit nonexistent scratch" "false" "$(echo "$T63_PASS" | cut -d'|' -f2-)"
 fi
 
 # =========================================================================

@@ -313,6 +313,12 @@ async function createMcpServer(): Promise<McpServer> {
     "Fetch specific sections on demand via # notation (e.g. 'emmy#voice-personality'). " +
     "This keeps context lean — load only the sections you need for the current scene.",
     "",
+    "Scratch files: Exploratory prose, drafts, and fragments in scratch/. " +
+    "Create via create target='scratch'. Read via get_context scratch=['filename.md']. " +
+    "Write/append via write target='scratch'. Surgical edit via edit target='scratch'. " +
+    "Scratch files use # (h1) sections with lazy-loading like notes — get_context returns topMatter + TOC, fetch sections via # notation. " +
+    "Promote to a beat via write target='beat' source_scratch. Removed beats and archived variants land in scratch automatically.",
+    "",
     "Redlines: Inline editorial marks in prose files (<!-- @type(author): message -->). " +
     "Long redlines are word-wrapped at ~80 columns for human readability — the parser handles multi-line comments transparently. " +
     "When get_context returns redlines, check the 'warnings' array: it surfaces corrupt markup " +
@@ -478,7 +484,7 @@ async function createMcpServer(): Promise<McpServer> {
       project: projectParam,
       include: z.object({
         canon: z.array(z.string()).optional().describe("Canon entry IDs to load. Returns summary (top-matter before first ## header) + sections TOC. Use # for sections: 'emmy#voice-personality'. Type is inferred by scanning canon directories."),
-        scratch: z.array(z.string()).optional().describe("Scratch filenames, e.g. ['voice-codex.md']"),
+        scratch: z.array(z.string()).optional().describe("Scratch filenames, e.g. ['voice-codex.md']. Returns structured object with topMatter + sections TOC when # sections exist. Use # notation for specific sections: 'voice-codex.md#character-voice'. Returns raw string if no sections."),
         parts: z.array(z.string()).optional().describe("Part IDs, e.g. ['part-01']"),
         chapter_meta: z.array(z.string()).optional().describe("Chapter refs, e.g. ['part-01/chapter-03']"),
         chapter_prose: z.array(z.string()).optional().describe("Full chapter prose refs, e.g. ['part-01/chapter-03']. Returns {prose, version}."),
@@ -811,9 +817,10 @@ async function createMcpServer(): Promise<McpServer> {
       "target='canon' creates or rewrites a canon entry. Use ## sections to organize — agents lazy-load via # notation. " +
       "target='part_notes' writes part-level planning notes (big-picture context, always relevant to all chapters in this part). " +
       "target='chapter_notes' writes chapter-specific planning notes (detailed planning, psychology, themes, research). " +
+      "target='scratch' writes to an existing scratch file. " +
       "Notes use flexible markdown organization with proper headers — organize however makes sense for your thinking.",
     inputSchema: {
-      target: z.enum(["beat", "canon", "part_notes", "chapter_notes"]).describe("What to write"),
+      target: z.enum(["beat", "canon", "part_notes", "chapter_notes", "scratch"]).describe("What to write"),
       project: projectParam,
       content: z.string().optional().describe("The content to write. Required unless source_scratch is provided (beat only)."),
       part_id: z.string().optional().describe("Part identifier (beat, part_notes, chapter_notes)"),
@@ -823,6 +830,7 @@ async function createMcpServer(): Promise<McpServer> {
       source_scratch: z.string().optional().describe("Scratch filename to promote into this beat instead of providing content (beat only)"),
       type: z.string().optional().describe("Canon type directory name, e.g. 'characters', 'locations', 'factions' (canon only)"),
       id: z.string().optional().describe("Canon entry id (canon only)"),
+      filename: z.string().optional().describe("Scratch filename, e.g. 'voice-codex.md' (scratch only)"),
       meta: z.object({
         id: z.string().optional().describe("Canon entry id"),
         type: z.string().optional().describe("e.g. 'character', 'location'"),
@@ -893,6 +901,17 @@ async function createMcpServer(): Promise<McpServer> {
           );
           return jsonResult(result);
         }
+        case "scratch": {
+          if (!args.filename) throw new Error("filename is required for target='scratch'");
+          if (args.content === undefined) throw new Error("content is required for target='scratch'");
+          const root = store.projectRoot(project);
+          const result = await withCommit(
+            root,
+            () => store.writeScratch(project, args.filename!, args.content!, args.append ?? false),
+            `${args.append ? "Appended to" : "Updated"} scratch/${args.filename}`
+          );
+          return jsonResult(result);
+        }
       }
     } catch (err) {
       logToolError("write", err);
@@ -911,7 +930,7 @@ async function createMcpServer(): Promise<McpServer> {
       "find/replace pairs, applied atomically — if any edit fails, none are applied. " +
       "Use instead of write when changing words or sentences rather than rewriting.",
     inputSchema: {
-      target: z.enum(["beat", "canon", "part_notes", "chapter_notes"]).describe("What to edit"),
+      target: z.enum(["beat", "canon", "part_notes", "chapter_notes", "scratch"]).describe("What to edit"),
       project: projectParam,
       edits: z.array(z.object({
         old_str: z.string().describe("Exact text to find (must match exactly once)"),
@@ -923,6 +942,7 @@ async function createMcpServer(): Promise<McpServer> {
       variant_index: z.number().optional().describe("Which variant to edit, default 0 (beat only)"),
       type: z.string().optional().describe("Canon type directory name, e.g. 'characters' (canon only)"),
       id: z.string().optional().describe("Canon entry id (canon only)"),
+      filename: z.string().optional().describe("Scratch filename (scratch only)"),
     },
   }, async (args) => {
     const { target, project, edits } = args;
@@ -959,6 +979,13 @@ async function createMcpServer(): Promise<McpServer> {
           const outcome = await store.editChapterNotes(project, args.part_id!, args.chapter_id!, edits);
           await commitFiles(root, [outcome.result.path],
             `Edited chapter notes: ${args.part_id}/${args.chapter_id} (${outcome.edits_applied} edits)`);
+          return jsonResult(outcome);
+        }
+        case "scratch": {
+          if (!args.filename) throw new Error("filename is required for target='scratch'");
+          const outcome = await store.editScratch(project, args.filename, edits);
+          await commitFiles(root, [outcome.result.path],
+            `Edited scratch/${args.filename} (${outcome.edits_applied} edits)`);
           return jsonResult(outcome);
         }
       }
@@ -1268,8 +1295,8 @@ app.get("/help", async () => {
       get_context: "Primary read tool — returns any combination of project data in one call, including search. Supports: project_meta, parts, chapter_meta, chapter_prose, beats, beat_variants, canon (with # section notation), scratch, scratch_index, dirty_nodes, redlines, canon_list, guide, search.",
       create: "Create entities. target: project | part | chapter | beat | scratch | redline.",
       update: "Update metadata. target: project | part | chapter | node (dirty/clean).",
-      write: "Write/replace content. target: beat | canon | part_notes | chapter_notes. append=true to add content to end of notes/canon.",
-      edit: "Surgical find/replace. target: beat | canon | part_notes | chapter_notes. Atomic ordered edits.",
+      write: "Write/replace content. target: beat | canon | part_notes | chapter_notes | scratch. append=true to add content to end of notes/canon/scratch.",
+      edit: "Surgical find/replace. target: beat | canon | part_notes | chapter_notes | scratch. Atomic ordered edits.",
       remove: "Remove content. target: beat (prose → scratch) | redlines (resolve redlines).",
       select_variant: "Keep one variant of a beat, archive the rest to scratch.",
       reorder_beats: "Reorder beats within a chapter. Meta and prose updated together.",

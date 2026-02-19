@@ -690,7 +690,7 @@ Returns any combination of project data in one call via the `include` object:
 - `beats` — individual beat prose by ref (`part-01/chapter-01:b01`)
 - `beat_variants` — all variant blocks for a beat
 - `canon` — canon entries by ID (type auto-resolved). Returns summary + sections TOC. Use `#` for section fetch: `emmy#voice-personality`
-- `scratch` — scratch file content by filename
+- `scratch` — scratch file content by filename. Supports section-level lazy loading with `#` notation (e.g. `voice-codex.md#character-voice`)
 - `scratch_index` — scratch folder index
 - `dirty_nodes` — all nodes flagged dirty/conflict
 - `redlines` — inline redlines with scope/type/author filters
@@ -716,10 +716,12 @@ Returns any combination of project data in one call via the `include` object:
 - `write(target="beat", project, part_id, chapter_id, beat_id, content, append?)` → insert/replace prose for a beat
 - `write(target="beat", project, part_id, chapter_id, beat_id, source_scratch)` → promote scratch content into a beat
 - `write(target="canon", project, type, id, content, meta?)` → write canon entry markdown (replaces entire file)
+- `write(target="scratch", project, filename, content, append?)` → write to an existing scratch file (overwrite or append)
 
 ### `edit` — Surgical string replacements (target discriminator)
 - `edit(target="beat", project, part_id, chapter_id, beat_id, edits, variant_index?)` → find/replace within a beat's prose
 - `edit(target="canon", project, type, id, edits)` → find/replace within a canon entry
+- `edit(target="scratch", project, filename, edits)` → find/replace within a scratch file
 
 ### `remove` — Delete objects (target discriminator)
 - `remove(target="beat", project, part_id, chapter_id, beat_id)` → remove a beat (prose moves to scratch)
@@ -740,6 +742,15 @@ Returns any combination of project data in one call via the `include` object:
 ### Git Commit Behavior
 - **New projects** (`autoCommit: false`): Changes accumulate, commit via `session_summary`
 - **Legacy projects** or opt-in (`autoCommit: true`): Every write operation commits immediately
+
+### Text-Blob Parity Principle
+
+All text-blob targets (beat, canon, part_notes, chapter_notes, scratch) support the same three operations:
+1. **Read** via `get_context` — with section-level lazy loading (topMatter + sections TOC, `#` notation for individual sections)
+2. **Write** via `write` — full overwrite + append mode
+3. **Edit** via `edit` — surgical find/replace with atomic ordered edits
+
+When adding a new text-blob type, implement all three to maintain parity.
 
 ---
 
