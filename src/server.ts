@@ -14,7 +14,7 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +31,7 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 
 import * as store from "./store.js";
-import { ensureGitRepo, autoCommit, sessionCommit, lastSessionSummary, getUncommittedFiles } from "./git.js";
+import { ensureGitRepo, autoCommit, sessionCommit, lastSessionSummary, getUncommittedFiles, getFileVersion } from "./git.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -182,14 +182,10 @@ function jsonResult(data: unknown) {
 
 async function shouldAutoCommit(root: string): Promise<boolean> {
   try {
-    const { readFile } = await import("node:fs/promises");
-    const { join } = await import("node:path");
     const projectJson = await readFile(join(root, "project.json"), "utf-8");
     const project = JSON.parse(projectJson) as { autoCommit?: boolean };
-    // Default to true if not set (backward compatibility with existing projects)
     return project.autoCommit ?? true;
   } catch {
-    // If can't read project.json, default to true for safety
     return true;
   }
 }
@@ -241,7 +237,7 @@ function logToolError(toolName: string, err: unknown) {
 
 function requireArgs(args: Record<string, unknown>, fields: string[], context: string): void {
   for (const field of fields) {
-    if (!args[field]) {
+    if (args[field] === undefined || args[field] === null) {
       throw new Error(`${field} is required for ${context}`);
     }
   }
@@ -676,7 +672,6 @@ async function createMcpServer(): Promise<McpServer> {
           await commitFiles(root, [result.path], `Added @${args.redline_type}(claude) redline to ${args.part_id}/${args.chapter_id}`);
 
           // Get post-commit version
-          const { getFileVersion } = await import("./git.js");
           const relPath = result.path.startsWith(root) ? result.path.slice(root.length + 1) : result.path;
           const newVersion = await getFileVersion(root, relPath);
 
@@ -1470,6 +1465,7 @@ async function main() {
       for (const [sid, info] of sessions) {
         if (now - info.lastActivity > SESSION_TTL_MS) {
           console.log(`Reaping idle session ${sid} (idle ${Math.round((now - info.lastActivity) / 1000)}s)`);
+          sessions.delete(sid);
           info.transport.close().catch(err =>
             console.error(`Error closing idle session ${sid}:`, err)
           );
@@ -1495,7 +1491,7 @@ async function main() {
 
 let reaperInterval: ReturnType<typeof setInterval>;
 
-process.on("SIGINT", async () => {
+async function gracefulShutdown() {
   console.log("\nShutting down...");
   clearInterval(reaperInterval);
   for (const [sid, info] of sessions) {
@@ -1507,6 +1503,9 @@ process.on("SIGINT", async () => {
   }
   sessions.clear();
   process.exit(0);
-});
+}
+
+process.on("SIGINT", gracefulShutdown);
+process.on("SIGTERM", gracefulShutdown);
 
 main();

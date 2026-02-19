@@ -11,6 +11,7 @@
 import { readFile, writeFile, readdir, rename, mkdir, stat } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { getFileVersion, translateLineNumber } from "./git.js";
 
 // ---------------------------------------------------------------------------
 // Projects root — resolved once at startup
@@ -83,6 +84,16 @@ export function projectRoot(projectId: string): string {
   return root;
 }
 
+/**
+ * Validate a path segment (partId, chapterId, beatId, canon type/id, filename)
+ * to prevent path traversal attacks. Rejects values containing /, \, or ..
+ */
+function validateSegment(value: string, label: string): void {
+  if (/[/\\]/.test(value) || value.includes("..")) {
+    throw new Error(`Invalid ${label}: "${value}". Must not contain path separators or "..".`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Low-level helpers
 // ---------------------------------------------------------------------------
@@ -153,16 +164,16 @@ export interface GetRedlinesResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a word-wrapped summary comment: <!-- summary: text -->
+ * Build a word-wrapped HTML comment block: <!-- {tag}: text -->
  * Wraps at ~80 columns for human readability.
  */
-function buildSummaryBlock(summary: string): string {
+function buildCommentBlock(tag: string, summary: string): string {
   if (!summary) return "";
   const safeMessage = summary.replace(/\s+/g, " ").trim();
-  const singleLine = `<!-- summary: ${safeMessage} -->`;
+  const singleLine = `<!-- ${tag}: ${safeMessage} -->`;
   if (singleLine.length <= 80) return singleLine;
 
-  const prefix = "<!-- summary: ";
+  const prefix = `<!-- ${tag}: `;
   const suffix = " -->";
   const words = safeMessage.split(" ");
   const lines: string[] = [];
@@ -181,32 +192,12 @@ function buildSummaryBlock(summary: string): string {
   return lines.join("\n");
 }
 
-/**
- * Build a word-wrapped chapter-summary comment.
- */
+function buildSummaryBlock(summary: string): string {
+  return buildCommentBlock("summary", summary);
+}
+
 function buildChapterSummaryBlock(summary: string): string {
-  if (!summary) return "";
-  const safeMessage = summary.replace(/\s+/g, " ").trim();
-  const singleLine = `<!-- chapter-summary: ${safeMessage} -->`;
-  if (singleLine.length <= 80) return singleLine;
-
-  const prefix = "<!-- chapter-summary: ";
-  const suffix = " -->";
-  const words = safeMessage.split(" ");
-  const lines: string[] = [];
-  let current = prefix;
-
-  for (const word of words) {
-    const candidate = current + (current === prefix ? "" : " ") + word;
-    if (candidate.length > 80 && current !== prefix) {
-      lines.push(current);
-      current = word;
-    } else {
-      current = candidate;
-    }
-  }
-  lines.push(current + suffix);
-  return lines.join("\n");
+  return buildCommentBlock("chapter-summary", summary);
 }
 
 /**
@@ -792,6 +783,7 @@ export async function createPart(
   summary: string = "",
   arc: string = ""
 ): Promise<WriteResult[]> {
+  validateSegment(partId, "partId");
   const root = projectRoot(projectId);
   const partDir = join(root, "parts", partId);
   await mkdir(partDir, { recursive: true });
@@ -823,6 +815,8 @@ export async function createChapter(
   location: string = "",
   timelinePosition: string = ""
 ): Promise<WriteResult[]> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const root = projectRoot(projectId);
   const partDir = join(root, "parts", partId);
 
@@ -886,6 +880,7 @@ export interface PartData {
 }
 
 export async function getPart(projectId: string, partId: string): Promise<PartData> {
+  validateSegment(partId, "partId");
   return readJson<PartData>(join(projectRoot(projectId), "parts", partId, "part.json"));
 }
 
@@ -938,6 +933,8 @@ export interface ChapterMeta {
  * Also supports legacy full-fat meta files for backward compatibility.
  */
 export async function getChapterMeta(projectId: string, partId: string, chapterId: string): Promise<ChapterMeta> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const root = projectRoot(projectId);
   const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
   const mdPath = join(root, "parts", partId, `${chapterId}.md`);
@@ -1018,6 +1015,8 @@ export async function getChapterMeta(projectId: string, partId: string, chapterI
 }
 
 export async function getChapterProse(projectId: string, partId: string, chapterId: string): Promise<string> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   return readMd(join(projectRoot(projectId), "parts", partId, `${chapterId}.md`));
 }
 
@@ -1043,6 +1042,7 @@ export async function getBeatProse(
  * Returns empty string if file doesn't exist (graceful degradation).
  */
 export async function getPartNotes(projectId: string, partId: string): Promise<string> {
+  validateSegment(partId, "partId");
   const notesPath = join(projectRoot(projectId), "parts", partId, `${partId}.notes.md`);
   if (!existsSync(notesPath)) return "";
   return readMd(notesPath);
@@ -1053,6 +1053,8 @@ export async function getPartNotes(projectId: string, partId: string): Promise<s
  * Returns empty string if file doesn't exist (graceful degradation).
  */
 export async function getChapterNotes(projectId: string, partId: string, chapterId: string): Promise<string> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const notesPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.notes.md`);
   if (!existsSync(notesPath)) return "";
   return readMd(notesPath);
@@ -1102,6 +1104,7 @@ export async function getChapterNoteSection(
  * Creates file if it doesn't exist.
  */
 export async function writePartNotes(projectId: string, partId: string, content: string, append: boolean = false): Promise<WriteResult> {
+  validateSegment(partId, "partId");
   const notesPath = join(projectRoot(projectId), "parts", partId, `${partId}.notes.md`);
   if (append) {
     const existing = existsSync(notesPath) ? await readMd(notesPath) : "";
@@ -1126,6 +1129,8 @@ export async function writeChapterNotes(
   content: string,
   append: boolean = false
 ): Promise<WriteResult> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const notesPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.notes.md`);
   if (append) {
     const existing = existsSync(notesPath) ? await readMd(notesPath) : "";
@@ -1152,6 +1157,7 @@ export async function editPartNotes(
   edits_applied: number;
   changes: { old_str: string; new_str: string; context: string }[];
 }> {
+  validateSegment(partId, "partId");
   const notesPath = join(projectRoot(projectId), "parts", partId, `${partId}.notes.md`);
   const ref = `${partId}.notes.md`;
 
@@ -1181,6 +1187,8 @@ export async function editChapterNotes(
   edits_applied: number;
   changes: { old_str: string; new_str: string; context: string }[];
 }> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const notesPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.notes.md`);
   const ref = `${partId}/${chapterId}.notes.md`;
 
@@ -1244,6 +1252,8 @@ async function findCanonEntry(
 // ---------------------------------------------------------------------------
 
 export async function getCanon(projectId: string, type: string, id: string): Promise<{ content: string; meta: unknown }> {
+  validateSegment(type, "canon type");
+  validateSegment(id, "canon id");
   const basePath = join(projectRoot(projectId), "canon", type);
   const paths = resolveCanonPaths(basePath, id);
   if (!paths) {
@@ -1258,6 +1268,7 @@ export async function getCanon(projectId: string, type: string, id: string): Pro
 }
 
 export async function listCanon(projectId: string, type: string): Promise<string[]> {
+  validateSegment(type, "canon type");
   const dir = join(projectRoot(projectId), "canon", type);
   if (!existsSync(dir)) return [];
   const entries = await readdir(dir, { withFileTypes: true });
@@ -1432,6 +1443,7 @@ export async function getScratchIndex(projectId: string): Promise<ScratchIndex> 
 }
 
 export async function getScratch(projectId: string, filename: string): Promise<string> {
+  validateSegment(filename, "filename");
   return readMd(join(projectRoot(projectId), "scratch", filename));
 }
 
@@ -1509,12 +1521,12 @@ export async function getDirtyNodes(projectId: string): Promise<DirtyNode[]> {
     if (part.status === "dirty" || part.status === "conflict") {
       dirty.push({ ref: partId, status: part.status, dirty_reason: part.dirty_reason ?? null });
     }
-    for (const chapterId of part.chapters) {
+    await Promise.all(part.chapters.map(async (chapterId) => {
       let meta: ChapterMeta;
       try {
         meta = await getChapterMeta(projectId, partId, chapterId);
       } catch {
-        continue;
+        return;
       }
       if (meta.status === "dirty" || meta.status === "conflict") {
         dirty.push({ ref: `${partId}/${chapterId}`, status: meta.status, dirty_reason: meta.dirty_reason ?? null });
@@ -1528,7 +1540,7 @@ export async function getDirtyNodes(projectId: string): Promise<DirtyNode[]> {
           });
         }
       }
-    }
+    }));
   }
 
   return dirty;
@@ -1794,7 +1806,6 @@ export async function getRedlines(
       allWarnings.push(...warnings);
 
       const relPath = join("parts", partId, `${chapterId}.md`);
-      const { getFileVersion } = await import("./git.js");
       versions[`${partId}/${chapterId}`] = await getFileVersion(root, relPath);
     } catch {
       continue;
@@ -1842,12 +1853,13 @@ export async function insertRedline(
   author: string,
   version?: string
 ): Promise<WriteResult & { id: string; inserted_after_line: number; version: string }> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const root = projectRoot(projectId);
   const relPath = join("parts", partId, `${chapterId}.md`);
   const mdPath = join(root, relPath);
   const markdown = await readMd(mdPath);
 
-  const { getFileVersion, translateLineNumber } = await import("./git.js");
   const currentVersion = await getFileVersion(root, relPath);
 
   let targetLine = lineNumber;
@@ -1999,6 +2011,8 @@ export async function migrateChapterToMarkdownFirst(
   partId: string,
   chapterId: string
 ): Promise<string[]> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const root = projectRoot(projectId);
   const metaPath = join(root, "parts", partId, `${chapterId}.meta.json`);
   const mdPath = join(root, "parts", partId, `${chapterId}.md`);
@@ -2093,6 +2107,7 @@ export async function updateProject(projectId: string, patch: Partial<ProjectDat
 }
 
 export async function updatePart(projectId: string, partId: string, patch: Partial<PartData>): Promise<WriteResult> {
+  validateSegment(partId, "partId");
   const current = await getPart(projectId, partId);
   const updated = { ...current, ...patch };
   const path = join(projectRoot(projectId), "parts", partId, "part.json");
@@ -2106,6 +2121,8 @@ export async function updateChapterMeta(
   chapterId: string,
   patch: Partial<ChapterMeta>
 ): Promise<WriteResult[]> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
 
@@ -2180,6 +2197,8 @@ export async function writeBeatProse(
   content: string,
   append: boolean = false
 ): Promise<WriteResult> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const mdPath = join(projectRoot(projectId), "parts", partId, `${chapterId}.md`);
   const markdown = await readMd(mdPath);
 
@@ -2209,6 +2228,8 @@ export async function addBeat(
   beatDef: BeatMeta,
   afterBeatId?: string
 ): Promise<WriteResult[]> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const root = projectRoot(projectId);
   const meta = await getChapterMeta(projectId, partId, chapterId);
 
@@ -2241,7 +2262,11 @@ export async function addBeat(
   }
   if (afterBeatId) {
     const idx = sidecar.beats.findIndex((b) => b.id === afterBeatId);
-    sidecar.beats.splice(idx + 1, 0, slimBeat);
+    if (idx === -1) {
+      sidecar.beats.push(slimBeat);
+    } else {
+      sidecar.beats.splice(idx + 1, 0, slimBeat);
+    }
   } else {
     sidecar.beats.push(slimBeat);
   }
@@ -2259,6 +2284,8 @@ export async function removeBeat(
   chapterId: string,
   beatId: string
 ): Promise<WriteResult[]> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
 
@@ -2338,6 +2365,8 @@ export async function reorderBeats(
   chapterId: string,
   beatOrder: string[]
 ): Promise<{ results: WriteResult[]; previous_order: string[]; new_order: string[] }> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const root = projectRoot(projectId);
   const meta = await getChapterMeta(projectId, partId, chapterId);
   const results: WriteResult[] = [];
@@ -2412,6 +2441,8 @@ export async function selectBeatVariant(
   kept: { index: number; preview: string };
   archived: { index: number; scratch_file: string }[];
 }> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
 
@@ -2614,7 +2645,6 @@ export async function getContext(
         const prose = await getChapterProse(projectId, partId, chapterId);
         const root = projectRoot(projectId);
         const relPath = join("parts", partId, `${chapterId}.md`);
-        const { getFileVersion } = await import("./git.js");
         const version = await getFileVersion(root, relPath);
         chapterProse[ref] = { prose, version };
       } catch (err) {
@@ -2847,6 +2877,8 @@ export async function editBeatProse(
   edits_applied: number;
   changes: { old_str: string; new_str: string; context: string }[];
 }> {
+  validateSegment(partId, "partId");
+  validateSegment(chapterId, "chapterId");
   // Validate beat exists in meta
   const meta = await getChapterMeta(projectId, partId, chapterId);
   if (!meta.beats.some((b) => b.id === beatId)) {
@@ -2907,6 +2939,7 @@ export async function setNodeStatus(
   const results: WriteResult[] = [];
   const parts = nodeRef.split("/");
   const partId = parts[0]!;
+  validateSegment(partId, "partId");
   const isDirty = status === "dirty";
   const desc = isDirty ? `dirty: ${reason}` : "clean";
 
@@ -2921,6 +2954,7 @@ export async function setNodeStatus(
   } else {
     const chapterBeat = parts[1]!;
     const [chapterId, beatId] = chapterBeat.split(":");
+    if (chapterId) validateSegment(chapterId, "chapterId");
 
     if (!beatId) {
       // Chapter-level dirty/clean — dirty_reason stays in sidecar
@@ -2975,6 +3009,8 @@ export async function updateCanon(
   meta?: unknown,
   append: boolean = false
 ): Promise<WriteResult[]> {
+  validateSegment(type, "canon type");
+  validateSegment(id, "canon id");
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
   const basePath = join(root, "canon", type);
@@ -3015,6 +3051,8 @@ export async function editCanon(
   edits_applied: number;
   changes: { old_str: string; new_str: string; context: string }[];
 }> {
+  validateSegment(type, "canon type");
+  validateSegment(id, "canon id");
   const root = projectRoot(projectId);
   const basePath = join(root, "canon", type);
   const paths = resolveCanonPaths(basePath, id);
@@ -3055,6 +3093,7 @@ export async function addScratch(
   mood: string = "",
   potentialPlacement: string | null = null
 ): Promise<WriteResult[]> {
+  validateSegment(filename, "filename");
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
   const scratchPath = join(root, "scratch", filename);
@@ -3084,6 +3123,9 @@ export async function promoteScratch(
   targetChapterId: string,
   targetBeatId: string
 ): Promise<WriteResult[]> {
+  validateSegment(filename, "filename");
+  validateSegment(targetPartId, "partId");
+  validateSegment(targetChapterId, "chapterId");
   const root = projectRoot(projectId);
   const results: WriteResult[] = [];
 
