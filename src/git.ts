@@ -13,6 +13,9 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("git");
 
 const exec = promisify(execFile);
 
@@ -39,10 +42,12 @@ export async function ensureGitRepo(root: string): Promise<void> {
     if (resolve(toplevel) !== resolve(root)) {
       throw new Error("parent repo, not ours");
     }
+    log.debug(`Git repo exists: ${root}`);
   } catch {
     await git(root, "init");
     await git(root, "add", "-A");
     await git(root, "commit", "-m", "[auto] Initialize project");
+    log.info(`Initialized git repo: ${root}`);
   }
 }
 
@@ -72,7 +77,9 @@ export async function autoCommit(
   if (!diff) return null;
 
   await git(root, "commit", "-m", `[auto] ${message}`);
-  return git(root, "rev-parse", "--short", "HEAD");
+  const hash = await git(root, "rev-parse", "--short", "HEAD");
+  log.debug(`Auto-commit ${hash}: ${files.length} file(s) — ${message}`);
+  return hash;
 }
 
 /**
@@ -203,7 +210,9 @@ export async function sessionCommit(root: string, message: string): Promise<stri
   if (!diff) return null;
 
   await git(root, "commit", "-m", `[session] ${message}`);
-  return git(root, "rev-parse", "--short", "HEAD");
+  const hash = await git(root, "rev-parse", "--short", "HEAD");
+  log.info(`Session commit ${hash}: ${message}`);
+  return hash;
 }
 
 /**

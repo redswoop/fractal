@@ -32,6 +32,12 @@ import * as z from "zod/v4";
 
 import * as store from "./store.js";
 import { ensureGitRepo, autoCommit, sessionCommit, lastSessionSummary, getUncommittedFiles, getFileVersion } from "./git.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("server");
+const authLog = createLogger("auth");
+const gitLog = createLogger("git");
+const toolLog = createLogger("tool");
 
 // ---------------------------------------------------------------------------
 // Config
@@ -67,7 +73,7 @@ let jwksKeySet: ReturnType<typeof createRemoteJWKSet> | null = null;
 
 async function initializeOidc(): Promise<void> {
   if (!OIDC_ISSUER_URL) {
-    console.log("[auth] OIDC_ISSUER_URL not set — authentication disabled");
+    authLog.info("OIDC_ISSUER_URL not set — authentication disabled");
     return;
   }
 
@@ -79,7 +85,7 @@ async function initializeOidc(): Promise<void> {
 
   for (const url of discoveryUrls) {
     try {
-      console.log(`[auth] Trying OIDC discovery: ${url}`);
+      authLog.info(`Trying OIDC discovery: ${url}`);
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
       if (res.ok) {
         const d = (await res.json()) as Record<string, unknown>;
@@ -89,11 +95,11 @@ async function initializeOidc(): Promise<void> {
           token_endpoint: d.token_endpoint as string,
           jwks_uri: d.jwks_uri as string,
         };
-        console.log("[auth] OIDC discovery succeeded");
+        authLog.info("OIDC discovery succeeded");
         break;
       }
     } catch (err) {
-      console.warn(`[auth] Discovery failed for ${url}:`, err instanceof Error ? err.message : err);
+      authLog.warn(`Discovery failed for ${url}: ${err instanceof Error ? err.message : err}`);
     }
   }
 
@@ -105,7 +111,7 @@ async function initializeOidc(): Promise<void> {
       token_endpoint: `${OIDC_ISSUER_URL}/webman/sso/SSOAccessToken.cgi`,
       jwks_uri: `${OIDC_ISSUER_URL}/webman/sso/openid-jwks.json`,
     };
-    console.log("[auth] Using fallback Synology OIDC endpoints");
+    authLog.info("Using fallback Synology OIDC endpoints");
   }
 
   jwksKeySet = createRemoteJWKSet(new URL(oidcConfig.jwks_uri), {
@@ -114,10 +120,10 @@ async function initializeOidc(): Promise<void> {
     timeoutDuration: 10_000,
   });
 
-  console.log(`[auth] Issuer:   ${oidcConfig.issuer}`);
-  console.log(`[auth] Auth:     ${oidcConfig.authorization_endpoint}`);
-  console.log(`[auth] Token:    ${oidcConfig.token_endpoint}`);
-  console.log(`[auth] JWKS:     ${oidcConfig.jwks_uri}`);
+  authLog.info(`Issuer:   ${oidcConfig.issuer}`);
+  authLog.info(`Auth:     ${oidcConfig.authorization_endpoint}`);
+  authLog.info(`Token:    ${oidcConfig.token_endpoint}`);
+  authLog.info(`JWKS:     ${oidcConfig.jwks_uri}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -199,8 +205,7 @@ async function commitFiles(root: string, paths: string[], message: string): Prom
   try {
     await autoCommit(root, files, message);
   } catch (err) {
-    console.error(`[git-warning] Auto-commit failed for "${message}":`,
-      err instanceof Error ? err.message : err);
+    gitLog.warn(`Auto-commit failed for "${message}": ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -219,27 +224,49 @@ async function withCommit<T extends store.WriteResult | store.WriteResult[]>(
 // Tool-level logging
 // ---------------------------------------------------------------------------
 
-function logToolCall(toolName: string, args: Record<string, unknown>) {
-  const argSummary = Object.entries(args)
-    .map(([k, v]) => {
-      const s = typeof v === "string" ? v : JSON.stringify(v);
-      const val = s && s.length > 80 ? s.slice(0, 80) + "…" : s;
-      return `${k}=${val}`;
-    })
-    .join(", ");
-  console.log(`[tool] ${toolName}(${argSummary})`);
+function logToolCall(toolName: string, action: string, args?: Record<string, unknown>) {
+  toolLog.info(`${toolName}: ${action}`);
+  if (args) {
+    const argSummary = Object.entries(args)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => {
+        const s = typeof v === "string" ? v : JSON.stringify(v);
+        const val = s && s.length > 80 ? s.slice(0, 80) + "…" : s;
+        return `${k}=${val}`;
+      })
+      .join(", ");
+    toolLog.debug(`${toolName} args: ${argSummary}`);
+  }
 }
 
 function logToolError(toolName: string, err: unknown) {
   const message = err instanceof Error ? err.message : String(err);
-  console.error(`[tool-error] ${toolName}: ${message}`);
+  toolLog.error(`${toolName}: ${message}`);
+}
+
+function logToolResult(toolName: string, startMs: number) {
+  toolLog.info(`${toolName} OK (${Date.now() - startMs}ms)`);
 }
 
 function requireArgs(args: Record<string, unknown>, fields: string[], context: string): void {
-  for (const field of fields) {
-    if (args[field] === undefined || args[field] === null) {
-      throw new Error(`${field} is required for ${context}`);
-    }
+  const missing = fields.filter(f => {
+    const v = args[f];
+    return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+  });
+  if (missing.length > 0) {
+    const provided = Object.entries(args)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => {
+        const s = typeof v === "string" ? v : JSON.stringify(v);
+        return `${k}=${s && s.length > 60 ? s.slice(0, 60) + "…" : s}`;
+      })
+      .join(", ");
+    throw new Error(
+      `Missing required fields: ${missing.join(", ")}. ` +
+      `Context: ${context}. ` +
+      `Provided: ${provided}. ` +
+      `Required: ${fields.join(", ")}`
+    );
   }
 }
 
@@ -350,8 +377,11 @@ async function createMcpServer(): Promise<McpServer> {
     description: "List all available projects with status briefing. Includes uncommitted file count for all projects. In-progress projects also include dirty node count, open redline count, and last session summary.",
     inputSchema: {},
   }, async () => {
+    const t0 = Date.now();
+    logToolCall("list_projects", "listing all projects");
     const projects = await store.listProjects();
     if (projects.length === 0) {
+      logToolResult("list_projects", t0);
       return textResult("No projects found. Use create to start one.");
     }
 
@@ -388,6 +418,7 @@ async function createMcpServer(): Promise<McpServer> {
       return { ...p, ...extra };
     }));
 
+    logToolResult("list_projects", t0);
     return jsonResult(enriched);
   });
 
@@ -417,20 +448,23 @@ async function createMcpServer(): Promise<McpServer> {
       guide: z.string().optional().describe("Markdown guide text (save only)"),
     },
   }, async (args) => {
-    logToolCall("template", { action: args.action, template_id: args.template_id, project: args.project });
+    const t0 = Date.now();
+    logToolCall("template", `${args.action}${args.template_id ? ` "${args.template_id}"` : ""}${args.project ? ` → ${args.project}` : ""}`);
     try {
+      let res;
       switch (args.action) {
         case "list": {
           const templates = await store.listTemplates();
-          if (templates.length === 0) {
-            return textResult("No templates found. Projects will use the default setup (characters + locations).");
-          }
-          return jsonResult(templates);
+          res = templates.length === 0
+            ? textResult("No templates found. Projects will use the default setup (characters + locations).")
+            : jsonResult(templates);
+          break;
         }
         case "get": {
           if (!args.template_id) throw new Error("template_id is required for action='get'");
           const template = await store.loadTemplate(args.template_id);
-          return jsonResult(template);
+          res = jsonResult(template);
+          break;
         }
         case "save": {
           requireArgs(args, ["template_id", "name", "description"], "action='save'");
@@ -444,7 +478,8 @@ async function createMcpServer(): Promise<McpServer> {
             guide: args.guide ?? null,
           };
           await store.saveTemplate(template);
-          return textResult(`Template "${args.template_id}" saved with ${args.canon_types.length} canon types.`);
+          res = textResult(`Template "${args.template_id}" saved with ${args.canon_types.length} canon types.`);
+          break;
         }
         case "apply": {
           if (!args.template_id) throw new Error("template_id is required for action='apply'");
@@ -454,7 +489,7 @@ async function createMcpServer(): Promise<McpServer> {
           if (result.changed_files.length > 0) {
             await commitFiles(result.root, result.changed_files, `[auto] apply template: ${args.template_id}`);
           }
-          return jsonResult({
+          res = jsonResult({
             template_id: args.template_id,
             created_dirs: result.created_dirs,
             guide_updated: result.guide_updated,
@@ -462,8 +497,11 @@ async function createMcpServer(): Promise<McpServer> {
               ? `Applied "${args.template_id}": created ${result.created_dirs.join(", ")}${result.guide_updated ? ", updated GUIDE.md" : ""}`
               : `Applied "${args.template_id}": all canon dirs already exist${result.guide_updated ? ", updated GUIDE.md" : ""}`,
           });
+          break;
         }
       }
+      logToolResult("template", t0);
+      return res!;
     } catch (err) {
       logToolError("template", err);
       throw err;
@@ -509,6 +547,8 @@ async function createMcpServer(): Promise<McpServer> {
       }).describe("What to include. Every key is optional. Request exactly what you need."),
     },
   }, async ({ project, include }) => {
+    const t0 = Date.now();
+    logToolCall("get_context", `reading ${project}`, { include: Object.keys(include).join(", ") });
     // Separate search from store-native includes
     const { search: searchOpts, ...storeInclude } = include;
     const data = await store.getContext(project, storeInclude) as Record<string, unknown>;
@@ -538,6 +578,7 @@ async function createMcpServer(): Promise<McpServer> {
       }
     }
 
+    logToolResult("get_context", t0);
     return jsonResult(data);
   });
 
@@ -576,9 +617,9 @@ async function createMcpServer(): Promise<McpServer> {
         depended_by: z.array(z.string()).optional().describe("Beat refs that depend on this"),
       }).optional().describe("Beat definition (beat only). Required: id, label, summary."),
       after_beat_id: z.string().optional().describe("Insert after this beat ID (beat only). Omit to append."),
-      filename: z.string().optional().describe("Scratch filename, e.g. 'unit7-dream-sequence.md' (scratch only)"),
-      content: z.string().optional().describe("Content of the scratch file (scratch only)"),
-      note: z.string().optional().describe("Note about what this is and where it might go (scratch only)"),
+      filename: z.string().optional().describe("REQUIRED for target='scratch'. Filename, e.g. 'unit7-dream-sequence.md'."),
+      content: z.string().optional().describe("Content to write. Required for target='scratch' and target='beat' (unless source_scratch provided)."),
+      note: z.string().optional().describe("REQUIRED for target='scratch'. Note about what this is and where it might go."),
       characters: z.array(z.string()).optional().describe("Characters involved (scratch only)"),
       mood: z.string().optional().describe("Mood/tone description (scratch only)"),
       potential_placement: z.string().optional().describe("Where this might end up, e.g. 'part-01/chapter-04' (scratch only)"),
@@ -590,9 +631,18 @@ async function createMcpServer(): Promise<McpServer> {
       version: z.string().optional().describe("Version token for line-number translation if file changed (redline only)"),
     },
   }, async (args) => {
+    const t0 = Date.now();
     const { target } = args;
-    logToolCall("create", { target, project: args.project, part_id: args.part_id, chapter_id: args.chapter_id });
+    const createDesc = target === "project" ? `new project "${args.project}"`
+      : target === "part" ? `${args.part_id} in ${args.project}`
+      : target === "chapter" ? `${args.part_id}/${args.chapter_id} in ${args.project}`
+      : target === "beat" ? `beat in ${args.part_id}/${args.chapter_id} (${args.project})`
+      : target === "scratch" ? `scratch "${args.filename}" in ${args.project}`
+      : target === "redline" ? `@${args.redline_type} redline in ${args.part_id}/${args.chapter_id} (${args.project})`
+      : `${target} in ${args.project}`;
+    logToolCall("create", createDesc);
     try {
+      let res;
       switch (target) {
         case "project": {
           if (!args.project) throw new Error("project is required (the project ID to create)");
@@ -603,12 +653,13 @@ async function createMcpServer(): Promise<McpServer> {
           }
           const root = await store.ensureProjectStructure(args.project, args.title, tmpl);
           await ensureGitRepo(root);
-          return jsonResult({
+          res = jsonResult({
             project: args.project,
             root,
             template: args.template ?? "default",
             description: `Created project "${args.title}" at ${root}`,
           });
+          break;
         }
         case "part": {
           requireArgs(args, ["project", "part_id", "title"], "target='part'");
@@ -618,7 +669,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.createPart(args.project!, args.part_id!, args.title!, args.summary ?? "", args.arc ?? ""),
             `Created part ${args.part_id}: ${args.title}`
           );
-          return jsonResult(results);
+          res = jsonResult(results);
+          break;
         }
         case "chapter": {
           requireArgs(args, ["project", "part_id", "chapter_id", "title"], "target='chapter'");
@@ -628,7 +680,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.createChapter(args.project!, args.part_id!, args.chapter_id!, args.title!, args.summary ?? "", args.pov ?? "", args.location ?? "", args.timeline_position ?? ""),
             `Created chapter ${args.part_id}/${args.chapter_id}: ${args.title}`
           );
-          return jsonResult(results);
+          res = jsonResult(results);
+          break;
         }
         case "beat": {
           requireArgs(args, ["project", "part_id", "chapter_id", "beat"], "target='beat'");
@@ -649,7 +702,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.addBeat(args.project!, args.part_id!, args.chapter_id!, beatDef, args.after_beat_id),
             `Added beat ${beatDef.id} to ${args.part_id}/${args.chapter_id}`
           );
-          return jsonResult(results);
+          res = jsonResult(results);
+          break;
         }
         case "scratch": {
           requireArgs(args, ["project", "filename", "note"], "target='scratch'");
@@ -660,7 +714,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.addScratch(args.project!, args.filename!, args.content!, args.note!, args.characters ?? [], args.mood ?? "", args.potential_placement ?? null),
             `Added scratch: ${args.filename}`
           );
-          return jsonResult(results);
+          res = jsonResult(results);
+          break;
         }
         case "redline": {
           requireArgs(args, ["project", "part_id", "chapter_id", "redline_type"], "target='redline'");
@@ -681,14 +736,17 @@ async function createMcpServer(): Promise<McpServer> {
           const relPath = result.path.startsWith(root) ? result.path.slice(root.length + 1) : result.path;
           const newVersion = await getFileVersion(root, relPath);
 
-          return jsonResult({
+          res = jsonResult({
             id: result.id,
             inserted_after_line: result.inserted_after_line,
             location: `${args.part_id}/${args.chapter_id}`,
             version: newVersion,
           });
+          break;
         }
       }
+      logToolResult("create", t0);
+      return res!;
     } catch (err) {
       logToolError("create", err);
       throw err;
@@ -757,9 +815,19 @@ async function createMcpServer(): Promise<McpServer> {
       new_id: z.string().optional().describe("New canon entry ID for renaming (canon only)"),
     },
   }, async (args) => {
+    const t0 = Date.now();
     const { target, project } = args;
-    logToolCall("update", { target, project, part_id: args.part_id, chapter_id: args.chapter_id, node_ref: args.node_ref });
+    const updateDesc = target === "project" ? `project ${project}`
+      : target === "part" ? `${args.part_id ?? "?"} in ${project}`
+      : target === "chapter" ? `${args.part_id ?? "?"}/${args.chapter_id ?? "?"} in ${project}`
+      : target === "node" ? `${args.mark ?? "?"} ${args.node_ref ?? "?"} in ${project}`
+      : target === "scratch" ? `${args.archived ? "archive" : "unarchive"} scratch in ${project}`
+      : target === "beats" ? `batch ${args.beat_refs?.length ?? 0} beats in ${project}`
+      : target === "canon" ? `canon ${args.type ?? "?"}/${args.id ?? "?"} in ${project}`
+      : `${target} in ${project}`;
+    logToolCall("update", updateDesc);
     try {
+      let res;
       switch (target) {
         case "project": {
           if (!args.patch) throw new Error("patch is required for target='project'");
@@ -769,7 +837,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.updateProject(project, args.patch! as Partial<store.ProjectData>),
             `Updated project: ${Object.keys(args.patch).join(", ")}`
           );
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
         case "part": {
           if (!args.part_id) throw new Error("part_id is required for target='part'");
@@ -780,7 +849,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.updatePart(project, args.part_id!, args.patch! as Partial<store.PartData>),
             `Updated ${args.part_id}: ${Object.keys(args.patch).join(", ")}`
           );
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
         case "chapter": {
           requireArgs(args, ["part_id", "chapter_id", "patch"], "target='chapter'");
@@ -790,7 +860,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.updateChapterMeta(project, args.part_id!, args.chapter_id!, args.patch! as Partial<store.ChapterMeta>),
             `Updated ${args.part_id}/${args.chapter_id} meta: ${Object.keys(args.patch!).join(", ")}`
           );
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
         case "node": {
           if (!args.node_ref) throw new Error("node_ref is required for target='node'");
@@ -807,7 +878,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.setNodeStatus(project, args.node_ref!, args.mark!, args.reason),
             commitMsg
           );
-          return jsonResult(results);
+          res = jsonResult(results);
+          break;
         }
         case "scratch": {
           if (!args.filenames || args.filenames.length === 0) {
@@ -820,7 +892,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.archiveScratch(project, args.filenames!, archived),
             `${archived ? "Archived" : "Unarchived"} scratch: ${args.filenames!.join(", ")}`
           );
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
         case "beats": {
           if (!args.beat_refs || args.beat_refs.length === 0) {
@@ -856,11 +929,12 @@ async function createMcpServer(): Promise<McpServer> {
           await commitFiles(root, allResults.map(r => r.path),
             `Batch updated ${beatsUpdated} beat(s) across ${byChapter.size} chapter(s)`);
 
-          return jsonResult({
+          res = jsonResult({
             beats_updated: beatsUpdated,
             chapters_touched: byChapter.size,
             details: allResults,
           });
+          break;
         }
         case "canon": {
           if (!args.type) throw new Error("type is required for target='canon'");
@@ -872,15 +946,19 @@ async function createMcpServer(): Promise<McpServer> {
             const result = await store.renameCanon(project, args.type, args.id, args.new_id);
             await commitFiles(root, result.files.map(f => f.path),
               `Renamed canon ${args.type}/${args.id} → ${args.new_id}`);
-            return jsonResult(result);
+            res = jsonResult(result);
+            break;
           }
 
           if (!args.action) throw new Error("action or new_id is required for target='canon'");
           const result = await store.archiveCanon(project, args.type, args.id, args.action === "archive");
           await commitFiles(root, [result.path], `${args.action === "archive" ? "Archived" : "Unarchived"} canon ${args.type}/${args.id}`);
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
       }
+      logToolResult("update", t0);
+      return res!;
     } catch (err) {
       logToolError("update", err);
       throw err;
@@ -923,9 +1001,18 @@ async function createMcpServer(): Promise<McpServer> {
       }).passthrough().optional().describe("Navigation metadata sidecar (canon only). Index data only — role, appears_in, timestamps."),
     },
   }, async (args) => {
+    const t0 = Date.now();
     const { target, project } = args;
-    logToolCall("write", { target, project, part_id: args.part_id, chapter_id: args.chapter_id, beat_id: args.beat_id, source_scratch: args.source_scratch, type: args.type, id: args.id });
+    const writeDesc = target === "beat" ? `${args.append ? "append variant" : "prose"} ${args.part_id}/${args.chapter_id}:${args.beat_id} in ${project}${args.source_scratch ? ` (from scratch/${args.source_scratch})` : ""}`
+      : target === "canon" ? `${args.append ? "append" : "write"} canon ${args.type}/${args.id} in ${project}`
+      : target === "part_notes" ? `${args.append ? "append" : "write"} part notes ${args.part_id} in ${project}`
+      : target === "chapter_notes" ? `${args.append ? "append" : "write"} chapter notes ${args.part_id}/${args.chapter_id} in ${project}`
+      : target === "scratch" ? `${args.append ? "append" : "write"} scratch/${args.filename} in ${project}`
+      : target === "guide" ? `${args.append ? "append" : "write"} GUIDE.md in ${project}`
+      : `${target} in ${project}`;
+    logToolCall("write", writeDesc);
     try {
+      let res;
       switch (target) {
         case "beat": {
           requireArgs(args, ["part_id", "chapter_id", "beat_id"], "target='beat'");
@@ -938,7 +1025,8 @@ async function createMcpServer(): Promise<McpServer> {
               () => store.promoteScratch(project, args.source_scratch!, args.part_id!, args.chapter_id!, args.beat_id!),
               `Promoted scratch/${args.source_scratch} → ${args.part_id}/${args.chapter_id}:${args.beat_id}`
             );
-            return jsonResult(results);
+            res = jsonResult(results);
+            break;
           }
 
           if (args.content === undefined) throw new Error("content is required for target='beat' (or provide source_scratch)");
@@ -947,7 +1035,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.writeBeatProse(project, args.part_id!, args.chapter_id!, args.beat_id!, args.content!, args.append ?? false),
             `${args.append ? "Appended variant to" : "Updated"} ${args.part_id}/${args.chapter_id} beat ${args.beat_id} prose`
           );
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
         case "canon": {
           if (!args.type) throw new Error("type is required for target='canon'");
@@ -959,7 +1048,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.updateCanon(project, args.type!, args.id!, args.content!, args.meta, args.append ?? false),
             `${args.append ? "Appended to" : "Canon update:"} ${args.type}/${args.id}`
           );
-          return jsonResult(results);
+          res = jsonResult(results);
+          break;
         }
         case "part_notes": {
           requireArgs(args, ["part_id"], "target='part_notes'");
@@ -970,7 +1060,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.writePartNotes(project, args.part_id!, args.content!, args.append ?? false),
             `${args.append ? "Appended to" : "Updated"} part notes: ${args.part_id}`
           );
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
         case "chapter_notes": {
           requireArgs(args, ["part_id", "chapter_id"], "target='chapter_notes'");
@@ -981,7 +1072,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.writeChapterNotes(project, args.part_id!, args.chapter_id!, args.content!, args.append ?? false),
             `${args.append ? "Appended to" : "Updated"} chapter notes: ${args.part_id}/${args.chapter_id}`
           );
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
         case "scratch": {
           if (!args.filename) throw new Error("filename is required for target='scratch'");
@@ -992,7 +1084,8 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.writeScratch(project, args.filename!, args.content!, args.append ?? false),
             `${args.append ? "Appended to" : "Updated"} scratch/${args.filename}`
           );
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
         case "guide": {
           if (args.content === undefined) throw new Error("content is required for target='guide'");
@@ -1002,9 +1095,12 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.writeGuide(project, args.content!, args.append ?? false),
             `${args.append ? "Appended to" : "Updated"} GUIDE.md`
           );
-          return jsonResult(result);
+          res = jsonResult(result);
+          break;
         }
       }
+      logToolResult("write", t0);
+      return res!;
     } catch (err) {
       logToolError("write", err);
       throw err;
@@ -1037,10 +1133,18 @@ async function createMcpServer(): Promise<McpServer> {
       filename: z.string().optional().describe("Scratch filename (scratch only)"),
     },
   }, async (args) => {
+    const t0 = Date.now();
     const { target, project, edits } = args;
-    logToolCall("edit", { target, project, edits_count: edits.length });
+    const editTarget = target === "beat" ? `${args.part_id}/${args.chapter_id}:${args.beat_id}`
+      : target === "canon" ? `canon ${args.type}/${args.id}`
+      : target === "part_notes" ? `part notes ${args.part_id}`
+      : target === "chapter_notes" ? `chapter notes ${args.part_id}/${args.chapter_id}`
+      : target === "scratch" ? `scratch/${args.filename}`
+      : target === "guide" ? "GUIDE.md" : target;
+    logToolCall("edit", `${editTarget} in ${project} (${edits.length} edits)`);
     try {
       const root = store.projectRoot(project);
+      let res;
       switch (target) {
         case "beat": {
           requireArgs(args, ["part_id", "chapter_id", "beat_id"], "target='beat'");
@@ -1049,7 +1153,8 @@ async function createMcpServer(): Promise<McpServer> {
           );
           await commitFiles(root, [outcome.result.path],
             `Edited ${args.part_id}/${args.chapter_id}:${args.beat_id} (${outcome.edits_applied} edits)`);
-          return jsonResult(outcome);
+          res = jsonResult(outcome);
+          break;
         }
         case "canon": {
           if (!args.type) throw new Error("type is required for target='canon'");
@@ -1057,36 +1162,43 @@ async function createMcpServer(): Promise<McpServer> {
           const outcome = await store.editCanon(project, args.type, args.id, edits);
           await commitFiles(root, [outcome.result.path],
             `Edited canon/${args.type}/${args.id} (${outcome.edits_applied} edits)`);
-          return jsonResult(outcome);
+          res = jsonResult(outcome);
+          break;
         }
         case "part_notes": {
           requireArgs(args, ["part_id"], "target='part_notes'");
           const outcome = await store.editPartNotes(project, args.part_id!, edits);
           await commitFiles(root, [outcome.result.path],
             `Edited part notes: ${args.part_id} (${outcome.edits_applied} edits)`);
-          return jsonResult(outcome);
+          res = jsonResult(outcome);
+          break;
         }
         case "chapter_notes": {
           requireArgs(args, ["part_id", "chapter_id"], "target='chapter_notes'");
           const outcome = await store.editChapterNotes(project, args.part_id!, args.chapter_id!, edits);
           await commitFiles(root, [outcome.result.path],
             `Edited chapter notes: ${args.part_id}/${args.chapter_id} (${outcome.edits_applied} edits)`);
-          return jsonResult(outcome);
+          res = jsonResult(outcome);
+          break;
         }
         case "scratch": {
           if (!args.filename) throw new Error("filename is required for target='scratch'");
           const outcome = await store.editScratch(project, args.filename, edits);
           await commitFiles(root, [outcome.result.path],
             `Edited scratch/${args.filename} (${outcome.edits_applied} edits)`);
-          return jsonResult(outcome);
+          res = jsonResult(outcome);
+          break;
         }
         case "guide": {
           const outcome = await store.editGuide(project, edits);
           await commitFiles(root, [outcome.result.path],
             `Edited GUIDE.md (${outcome.edits_applied} edits)`);
-          return jsonResult(outcome);
+          res = jsonResult(outcome);
+          break;
         }
       }
+      logToolResult("edit", t0);
+      return res!;
     } catch (err) {
       logToolError("edit", err);
       throw err;
@@ -1111,10 +1223,15 @@ async function createMcpServer(): Promise<McpServer> {
       redline_ids: z.array(z.string()).optional().describe("Redline IDs to resolve (redlines only), e.g. ['part-01/chapter-03:b02:n47']. Get these from get_context with redlines include."),
     },
   }, async (args) => {
+    const t0 = Date.now();
     const { target, project } = args;
-    logToolCall("remove", { target, project });
+    const removeDesc = target === "beat" ? `beat ${args.beat_id} from ${args.part_id}/${args.chapter_id} in ${project}`
+      : target === "redlines" ? `${args.redline_ids?.length ?? 0} redlines in ${project}`
+      : `${target} in ${project}`;
+    logToolCall("remove", removeDesc);
     try {
       const root = store.projectRoot(project);
+      let res;
       switch (target) {
         case "beat": {
           requireArgs(args, ["part_id", "chapter_id", "beat_id"], "target='beat'");
@@ -1123,20 +1240,25 @@ async function createMcpServer(): Promise<McpServer> {
             () => store.removeBeat(project, args.part_id!, args.chapter_id!, args.beat_id!),
             `Removed beat ${args.beat_id} from ${args.part_id}/${args.chapter_id} (prose → scratch)`
           );
-          return jsonResult(results);
+          res = jsonResult(results);
+          break;
         }
         case "redlines": {
           if (!args.redline_ids || args.redline_ids.length === 0) {
-            return textResult("No redline IDs provided. Nothing to resolve.");
+            res = textResult("No redline IDs provided. Nothing to resolve.");
+            break;
           }
           const results = await store.removeRedlineLines(project, args.redline_ids);
           if (results.length > 0) {
             await commitFiles(root, results.map((r) => r.path),
               `Resolved ${args.redline_ids.length} redline(s)`);
           }
-          return jsonResult({ resolved: args.redline_ids.length, files_modified: results.length });
+          res = jsonResult({ resolved: args.redline_ids.length, files_modified: results.length });
+          break;
         }
       }
+      logToolResult("remove", t0);
+      return res!;
     } catch (err) {
       logToolError("remove", err);
       throw err;
@@ -1158,7 +1280,8 @@ async function createMcpServer(): Promise<McpServer> {
       keep_index: z.number().describe("Zero-based index of the variant to keep (from get_context beat_variants)"),
     },
   }, async ({ project, part_id, chapter_id, beat_id, keep_index }) => {
-    logToolCall("select_variant", { project, part_id, chapter_id, beat_id, keep_index });
+    const t0 = Date.now();
+    logToolCall("select_variant", `keep #${keep_index} for ${part_id}/${chapter_id}:${beat_id} in ${project}`);
     try {
       const root = store.projectRoot(project);
       const outcome = await store.selectBeatVariant(project, part_id, chapter_id, beat_id, keep_index);
@@ -1166,6 +1289,7 @@ async function createMcpServer(): Promise<McpServer> {
         await commitFiles(root, outcome.results.map((r) => r.path),
           `Selected variant ${keep_index} for ${part_id}/${chapter_id}:${beat_id}`);
       }
+      logToolResult("select_variant", t0);
       return jsonResult({ kept: outcome.kept, archived: outcome.archived, files: outcome.results });
     } catch (err) {
       logToolError("select_variant", err);
@@ -1187,12 +1311,14 @@ async function createMcpServer(): Promise<McpServer> {
       beat_order: z.array(z.string()).describe("Complete list of beat IDs in the desired new order. Must contain every beat ID exactly once."),
     },
   }, async ({ project, part_id, chapter_id, beat_order }) => {
-    logToolCall("reorder_beats", { project, part_id, chapter_id, beat_order });
+    const t0 = Date.now();
+    logToolCall("reorder_beats", `${part_id}/${chapter_id} in ${project} → [${beat_order.join(", ")}]`);
     try {
       const root = store.projectRoot(project);
       const outcome = await store.reorderBeats(project, part_id, chapter_id, beat_order);
       await commitFiles(root, outcome.results.map((r) => r.path),
         `Reordered beats in ${part_id}/${chapter_id}: ${beat_order.join(", ")}`);
+      logToolResult("reorder_beats", t0);
       return jsonResult({ previous_order: outcome.previous_order, new_order: outcome.new_order, files: outcome.results });
     } catch (err) {
       logToolError("reorder_beats", err);
@@ -1212,10 +1338,12 @@ async function createMcpServer(): Promise<McpServer> {
       message: z.string().describe("Summary of what was accomplished in this session"),
     },
   }, async ({ project, message }) => {
-    logToolCall("session_summary", { project, message });
+    const t0 = Date.now();
+    logToolCall("session_summary", `commit ${project}: "${message.length > 60 ? message.slice(0, 60) + "…" : message}"`);
     try {
       const root = store.projectRoot(project);
       const hash = await sessionCommit(root, message);
+      logToolResult("session_summary", t0);
       if (hash) {
         return textResult(`Session commit created: ${hash} — ${message}`);
       }
@@ -1243,10 +1371,12 @@ async function createMcpServer(): Promise<McpServer> {
       chapter_id: z.string().describe("Chapter identifier"),
     },
   }, async ({ project, part_id, chapter_id }) => {
-    logToolCall("refresh_summaries", { project, part_id, chapter_id });
+    const t0 = Date.now();
+    logToolCall("refresh_summaries", `migrate ${part_id}/${chapter_id} in ${project}`);
     try {
       const root = store.projectRoot(project);
       const paths = await store.migrateChapterToMarkdownFirst(project, part_id, chapter_id);
+      logToolResult("refresh_summaries", t0);
       if (paths.length === 0) {
         return textResult("Chapter is already in markdown-first format.");
       }
@@ -1277,7 +1407,7 @@ const sessions = new Map<string, SessionInfo>();
 // Fastify app
 // ---------------------------------------------------------------------------
 
-const app = Fastify({ logger: true });
+const app = Fastify({ logger: false });
 
 // --- JSON body parser (lenient for empty DELETE bodies) ---
 app.removeContentTypeParser("application/json");
@@ -1499,7 +1629,7 @@ app.post("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
         const sid = transport.sessionId;
         if (sid && sessions.has(sid)) {
           sessions.delete(sid);
-          console.log(`Session closed: ${sid} (active: ${sessions.size})`);
+          log.info(`Session closed: ${sid} (active: ${sessions.size})`);
         }
       };
 
@@ -1589,25 +1719,26 @@ async function main() {
       const now = Date.now();
       for (const [sid, info] of sessions) {
         if (now - info.lastActivity > SESSION_TTL_MS) {
-          console.log(`Reaping idle session ${sid} (idle ${Math.round((now - info.lastActivity) / 1000)}s)`);
+          log.info(`Reaping idle session ${sid} (idle ${Math.round((now - info.lastActivity) / 1000)}s)`);
           sessions.delete(sid);
           info.transport.close().catch(err =>
-            console.error(`Error closing idle session ${sid}:`, err)
+            log.error(`Error closing idle session ${sid}: ${err}`)
+
           );
         }
       }
     }, REAPER_INTERVAL_MS);
 
     await app.listen({ port: PORT, host: "0.0.0.0" });
-    console.log(`\nFractal MCP server listening on http://0.0.0.0:${PORT}`);
-    console.log(`  Health check: http://localhost:${PORT}/health`);
-    console.log(`  Help:         http://localhost:${PORT}/help`);
-    console.log(`  MCP endpoint: http://localhost:${PORT}/mcp`);
-    console.log(`  Projects:     ${projectsRoot}`);
-    console.log(`  Test:         ${testRoot}`);
-    console.log(`  Session TTL:  ${SESSION_TTL_MS / 1000}s (reaper every ${REAPER_INTERVAL_MS / 1000}s)`);
-    console.log(`  Auth:         ${oidcConfig ? `enabled (issuer: ${oidcConfig.issuer})` : "disabled"}`);
-    console.log(`  Loaded:       ${projects.map((p) => p.id).join(", ") || "(none)"}\n`);
+    log.info(`Fractal MCP server listening on http://0.0.0.0:${PORT}`);
+    log.info(`  Health check: http://localhost:${PORT}/health`);
+    log.info(`  Help:         http://localhost:${PORT}/help`);
+    log.info(`  MCP endpoint: http://localhost:${PORT}/mcp`);
+    log.info(`  Projects:     ${projectsRoot}`);
+    log.info(`  Test:         ${testRoot}`);
+    log.info(`  Session TTL:  ${SESSION_TTL_MS / 1000}s (reaper every ${REAPER_INTERVAL_MS / 1000}s)`);
+    log.info(`  Auth:         ${oidcConfig ? `enabled (issuer: ${oidcConfig.issuer})` : "disabled"}`);
+    log.info(`  Loaded:       ${projects.map((p) => p.id).join(", ") || "(none)"}`);
   } catch (err) {
     app.log.error(err);
     process.exit(1);
@@ -1617,13 +1748,13 @@ async function main() {
 let reaperInterval: ReturnType<typeof setInterval>;
 
 async function gracefulShutdown() {
-  console.log("\nShutting down...");
+  log.info("Shutting down...");
   clearInterval(reaperInterval);
   for (const [sid, info] of sessions) {
     try {
       await info.transport.close();
     } catch (err) {
-      console.error(`Error closing session ${sid}:`, err);
+      log.error(`Error closing session ${sid}: ${err}`);
     }
   }
   sessions.clear();

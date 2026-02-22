@@ -12,6 +12,9 @@ import { readFile, writeFile, readdir, rename, mkdir, stat } from "node:fs/promi
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getFileVersion, translateLineNumber } from "./git.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("store");
 
 // ---------------------------------------------------------------------------
 // Projects root — resolved once at startup
@@ -43,7 +46,7 @@ function loadIgnorePatterns(): Set<string> {
     const trimmed = line.trim();
     if (trimmed && !trimmed.startsWith("#")) patterns.add(trimmed);
   }
-  console.log(`[fractal] Loaded ${patterns.size} ignore patterns from ${filePath}`);
+  log.info(`Loaded ${patterns.size} ignore patterns from ${filePath}`);
   return patterns;
 }
 
@@ -640,6 +643,7 @@ export async function saveTemplate(template: ProjectTemplate): Promise<void> {
   await mkdir(TEMPLATES_ROOT, { recursive: true });
   const templatePath = join(TEMPLATES_ROOT, `${template.id}.json`);
   await writeJson(templatePath, template);
+  log.info(`Saved template: ${template.id}`);
 }
 
 export async function applyTemplateToProject(
@@ -683,6 +687,7 @@ export async function applyTemplateToProject(
     guideUpdated = true;
   }
 
+  log.info(`Applied template to ${projectId}: created ${createdDirs.length} dirs`);
   return { root, created_dirs: createdDirs, guide_updated: guideUpdated, changed_files: changedFiles };
 }
 
@@ -769,6 +774,7 @@ export async function ensureProjectStructure(
     }
   }
 
+  log.info(`Created project structure: ${projectId}`);
   return root;
 }
 
@@ -799,6 +805,7 @@ export async function createPart(
     await writeJson(join(root, "project.json"), project);
   }
 
+  log.info(`Created part ${partId} in ${projectId}`);
   return [
     { path: partJsonPath, description: `Created ${partId}/part.json` },
     { path: join(root, "project.json"), description: `Added ${partId} to project.json parts list` },
@@ -851,6 +858,7 @@ export async function createChapter(
     await writeJson(join(partDir, "part.json"), part);
   }
 
+  log.info(`Created chapter ${partId}/${chapterId} in ${projectId}`);
   return [
     { path: mdPath, description: `Created ${partId}/${chapterId}.md` },
     { path: metaPath, description: `Created ${partId}/${chapterId}.meta.json` },
@@ -1112,6 +1120,7 @@ export async function writePartNotes(projectId: string, partId: string, content:
   } else {
     await writeMd(notesPath, content);
   }
+  log.debug(`Wrote part notes: ${partId}`);
   return {
     path: notesPath,
     description: `${append ? "Appended to" : "Updated"} part notes: ${partId}`,
@@ -1138,6 +1147,7 @@ export async function writeChapterNotes(
   } else {
     await writeMd(notesPath, content);
   }
+  log.debug(`Wrote chapter notes: ${partId}/${chapterId}`);
   return {
     path: notesPath,
     description: `${append ? "Appended to" : "Updated"} chapter notes: ${partId}/${chapterId}`,
@@ -1169,6 +1179,7 @@ export async function editPartNotes(
   const raw = await readMd(notesPath);
   const { text, changes } = applyEdits(raw, edits, ref);
   await writeMd(notesPath, text);
+  log.debug(`Edited part notes: ${partId} (${edits.length} edits)`);
 
   return {
     result: { path: notesPath, description: `Applied ${edits.length} edit(s) to ${ref}` },
@@ -1200,6 +1211,7 @@ export async function editChapterNotes(
   const raw = await readMd(notesPath);
   const { text, changes } = applyEdits(raw, edits, ref);
   await writeMd(notesPath, text);
+  log.debug(`Edited chapter notes: ${partId}/${chapterId} (${edits.length} edits)`);
 
   return {
     result: { path: notesPath, description: `Applied ${edits.length} edit(s) to ${ref}` },
@@ -1224,6 +1236,7 @@ export async function writeGuide(projectId: string, content: string, append: boo
   } else {
     await writeMd(guidePath, content);
   }
+  log.debug(`Wrote GUIDE.md for ${projectId}`);
   return {
     path: guidePath,
     description: `${append ? "Appended to" : "Updated"} GUIDE.md`,
@@ -1252,6 +1265,7 @@ export async function editGuide(
   const raw = await readMd(guidePath);
   const { text, changes } = applyEdits(raw, edits, ref);
   await writeMd(guidePath, text);
+  log.debug(`Edited GUIDE.md (${edits.length} edits)`);
 
   return {
     result: { path: guidePath, description: `Applied ${edits.length} edit(s) to ${ref}` },
@@ -1283,6 +1297,7 @@ export async function writeScratch(
   } else {
     await writeMd(scratchPath, content);
   }
+  log.debug(`Wrote scratch/${filename}`);
   return {
     path: scratchPath,
     description: `${append ? "Appended to" : "Updated"} scratch/${filename}`,
@@ -1313,6 +1328,7 @@ export async function editScratch(
   const raw = await readMd(scratchPath);
   const { text, changes } = applyEdits(raw, edits, ref);
   await writeMd(scratchPath, text);
+  log.debug(`Edited scratch/${filename} (${edits.length} edits)`);
 
   return {
     result: { path: scratchPath, description: `Applied ${edits.length} edit(s) to ${ref}` },
@@ -1506,6 +1522,7 @@ export async function archiveCanon(
   }
 
   await writeJson(metaPath, meta);
+  log.info(`${archive ? "Archived" : "Unarchived"} canon ${type}/${id}`);
   return {
     path: metaPath,
     description: `${archive ? "Archived" : "Unarchived"} canon entry ${type}/${id}`,
@@ -1636,6 +1653,7 @@ export async function renameCanon(
     }
   }
 
+  log.info(`Renamed canon ${type}/${oldId} \u2192 ${newId}`);
   return { files, files_renamed: filesRenamed, references_updated: referencesUpdated };
 }
 
@@ -1813,6 +1831,7 @@ export async function archiveScratch(
   }
 
   await writeJson(indexPath, index);
+  log.info(`${archived ? "Archived" : "Unarchived"} ${matched} scratch items`);
   return {
     path: indexPath,
     description: `${archived ? "Archived" : "Unarchived"} ${matched} scratch item(s)`,
@@ -2306,6 +2325,7 @@ export async function insertRedline(
   const insertedLine = targetLine + 1; // 1-based line number of the inserted redline
   const id = `${partId}/${chapterId}:${beatId}:n${insertedLine}`;
 
+  log.info(`Inserted @${type}(${author}) redline in ${partId}/${chapterId}`);
   return {
     path: mdPath,
     description: `Added @${type}(${author}) redline to ${partId}/${chapterId}:${beatId}`,
@@ -2385,6 +2405,7 @@ export async function removeRedlineLines(
     });
   }
 
+  log.info(`Removed ${redlineIds.length} redline(s)`);
   return results;
 }
 
@@ -2495,6 +2516,7 @@ export async function migrateChapterToMarkdownFirst(
   };
   await writeJson(metaPath, slimMeta);
 
+  log.info(`Migrated ${partId}/${chapterId} to markdown-first`);
   return [mdPath, metaPath];
 }
 
@@ -2505,6 +2527,7 @@ export async function updateProject(projectId: string, patch: Partial<ProjectDat
   const updated = { ...current, ...patch };
   const path = join(projectRoot(projectId), "project.json");
   await writeJson(path, updated);
+  log.debug(`Updated project ${projectId}: ${Object.keys(patch).join(", ")}`);
   return { path, description: "Updated project.json" };
 }
 
@@ -2514,6 +2537,7 @@ export async function updatePart(projectId: string, partId: string, patch: Parti
   const updated = { ...current, ...patch };
   const path = join(projectRoot(projectId), "parts", partId, "part.json");
   await writeJson(path, updated);
+  log.debug(`Updated part ${partId} in ${projectId}`);
   return { path, description: `Updated ${partId}/part.json` };
 }
 
@@ -2588,6 +2612,7 @@ export async function updateChapterMeta(
   await writeJson(metaPath, slimMeta);
   results.push({ path: metaPath, description: `Updated ${partId}/${chapterId}.meta.json` });
 
+  log.debug(`Updated chapter meta ${partId}/${chapterId}`);
   return results;
 }
 
@@ -2617,6 +2642,7 @@ export async function writeBeatProse(
   }
   await writeMd(mdPath, updated);
 
+  log.debug(`Wrote beat prose ${partId}/${chapterId}:${beatId}`);
   return {
     path: mdPath,
     description: `${append ? "Appended variant" : "Updated"} prose for ${partId}/${chapterId}:${beatId}`,
@@ -2674,6 +2700,7 @@ export async function addBeat(
   }
   await writeJson(metaPath, sidecar);
 
+  log.info(`Added beat ${beatDef.id} to ${partId}/${chapterId}`);
   return [
     { path: mdPath, description: `Added beat ${beatDef.id} to ${chapterId}.md` },
     { path: metaPath, description: `Added beat ${beatDef.id} to ${chapterId}.meta.json` },
@@ -2738,6 +2765,7 @@ export async function removeBeat(
     results.push({ path: scratchPath, description: `Moved ${removedBlocks.length} removed block(s) to scratch/${scratchFile}` });
   }
 
+  log.info(`Removed beat ${beatId} from ${partId}/${chapterId}`);
   return results;
 }
 
@@ -2829,6 +2857,7 @@ export async function reorderBeats(
   await writeMd(mdPath, updated);
   results.push({ path: mdPath, description: `Reordered beat markers in ${partId}/${chapterId}.md` });
 
+  log.debug(`Reordered beats in ${partId}/${chapterId}`);
   return { results, previous_order, new_order: beatOrder };
 }
 
@@ -2930,6 +2959,7 @@ export async function selectBeatVariant(
   await writeMd(mdPath, updated);
   results.push({ path: mdPath, description: `Selected variant ${keepIndex} for ${beatId} in ${chapterId}.md` });
 
+  log.debug(`Selected variant ${keepIndex} for ${partId}/${chapterId}:${beatId}`);
   return {
     results,
     kept: { index: keepIndex, preview: keptBlock.prose.slice(0, 100) },
@@ -3352,6 +3382,7 @@ export async function editBeatProse(
   const updated = reassembleChapter(parsed.preamble, parsed.blocks, parsed.postamble, parsed.chapterSummary);
   await writeMd(mdPath, updated);
 
+  log.debug(`Edited beat prose ${partId}/${chapterId}:${beatId} (${edits.length} edits)`);
   return {
     result: { path: mdPath, description: `Applied ${edits.length} edit(s) to ${partId}/${chapterId}:${beatId}` },
     edits_applied: edits.length,
@@ -3428,6 +3459,7 @@ export async function setNodeStatus(
     }
   }
 
+  log.debug(`Set node ${nodeRef} to ${status}`);
   return results;
 }
 
@@ -3468,6 +3500,7 @@ export async function updateCanon(
     results.push({ path: metaPath, description: `Updated ${metaLabel}` });
   }
 
+  log.debug(`Updated canon ${type}/${id}`);
   return results;
 }
 
@@ -3507,6 +3540,7 @@ export async function editCanon(
   // All edits passed — write to disk
   await writeMd(mdPath, text);
 
+  log.debug(`Edited canon ${type}/${id} (${edits.length} edits)`);
   return {
     result: { path: mdPath, description: `Applied ${edits.length} edit(s) to canon/${type}/${id}` },
     edits_applied: edits.length,
@@ -3543,6 +3577,7 @@ export async function addScratch(
   await writeJson(indexPath, index);
   results.push({ path: indexPath, description: "Updated scratch index" });
 
+  log.info(`Added scratch/${filename}`);
   return results;
 }
 
@@ -3578,5 +3613,6 @@ export async function promoteScratch(
     description: `Promoted scratch/${filename} → ${targetPartId}/${targetChapterId}:${targetBeatId}`,
   });
 
+  log.info(`Promoted scratch/${filename} → ${targetPartId}/${targetChapterId}:${targetBeatId}`);
   return results;
 }
