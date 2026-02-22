@@ -1,0 +1,38 @@
+[
+  {
+    "key": "ctrl+/",
+    "command": "editor.action.insertSnippet",
+    "args": { "snippet": "<!-- @note: $1 -->\n" },
+    "when": "editorTextFocus && resourceExtname == .md"
+  },
+  {
+    "key": "ctrl+shift+1",
+    "command": "editor.action.insertSnippet",
+    "args": { "snippet": "<!-- @dev: $1 -->\n" },
+    "when": "editorTextFocus && resourceExtname == .md"
+  },
+  {
+    "key": "ctrl+shift+2",
+    "command": "editor.action.insertSnippet",
+    "args": { "snippet": "<!-- @line: $1 -->\n" },
+    "when": "editorTextFocus && resourceExtname == .md"
+  },
+  {
+    "key": "ctrl+shift+3",
+    "command": "editor.action.insertSnippet",
+    "args": { "snippet": "<!-- @continuity: $1 -->\n" },
+    "when": "editorTextFocus && resourceExtname == .md"
+  },
+  {
+    "key": "ctrl+shift+4",
+    "command": "editor.action.insertSnippet",
+    "args": { "snippet": "<!-- @query: $1 -->\n" },
+    "when": "editorTextFocus && resourceExtname == .md"
+  },
+  {
+    "key": "ctrl+.",
+    "command": "editor.action.insertSnippet",
+    "args": { "snippet": "<!-- @flag -->\n" },
+    "when": "editorTextFocus && resourceExtname == .md"
+  }
+]

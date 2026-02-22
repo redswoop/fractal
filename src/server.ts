@@ -47,7 +47,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_VERSION = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8")).version as string;
 
 const PORT = parseInt(process.env["PORT"] ?? "3001", 10);
-const SESSION_TTL_MS = parseInt(process.env["SESSION_TTL_MS"] ?? String(30 * 60 * 1000), 10);
+const SESSION_TTL_MS = parseInt(process.env["SESSION_TTL_MS"] ?? String(4 * 60 * 60 * 1000), 10);
 const REAPER_INTERVAL_MS = parseInt(process.env["REAPER_INTERVAL_MS"] ?? "60000", 10);
 
 // Auth / OIDC config (all optional — unset = auth disabled)
@@ -1639,9 +1639,9 @@ app.post("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
       return reply.hijack();
     }
 
-    reply.code(400).send({
+    reply.code(404).send({
       jsonrpc: "2.0",
-      error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+      error: { code: -32000, message: "Session not found. Please re-initialize." },
       id: null,
     });
   } catch (error) {
@@ -1664,7 +1664,7 @@ app.get("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
   const sessionId = request.headers["mcp-session-id"] as string | undefined;
 
   if (!sessionId || !sessions.has(sessionId)) {
-    reply.code(400).send("Invalid or missing session ID");
+    reply.code(404).send("Session not found. Please re-initialize.");
     return;
   }
 
@@ -1682,7 +1682,7 @@ app.delete("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
   const sessionId = request.headers["mcp-session-id"] as string | undefined;
 
   if (!sessionId || !sessions.has(sessionId)) {
-    reply.code(400).send("Invalid or missing session ID");
+    reply.code(404).send("Session not found.");
     return;
   }
 

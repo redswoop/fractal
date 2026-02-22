@@ -1,0 +1,15 @@
+{
+	"name": "Fractal",
+	"image": "mcr.microsoft.com/devcontainers/typescript-node:1-24-bookworm",
+
+	"postCreateCommand": "npm install",
+	"postAttachCommand": "bash .devcontainer/setup-keybindings.sh",
+
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"files.associations": { "*.md": "markdown" }
+			}
+		}
+	}
+}

@@ -720,12 +720,16 @@ Returns any combination of project data in one call via the `include` object:
 - `write(target="beat", project, part_id, chapter_id, beat_id, content, append?)` → insert/replace prose for a beat
 - `write(target="beat", project, part_id, chapter_id, beat_id, source_scratch)` → promote scratch content into a beat
 - `write(target="canon", project, type, id, content, meta?)` → write canon entry markdown (replaces entire file)
+- `write(target="part_notes", project, part_id, content, append?)` → write or append part-level planning notes
+- `write(target="chapter_notes", project, part_id, chapter_id, content, append?)` → write or append chapter-level planning notes
 - `write(target="scratch", project, filename, content, append?)` → write to an existing scratch file (overwrite or append)
 - `write(target="guide", project, content, append?)` → write or append to GUIDE.md at project root
 
 ### `edit` — Surgical string replacements (target discriminator)
 - `edit(target="beat", project, part_id, chapter_id, beat_id, edits, variant_index?)` → find/replace within a beat's prose
 - `edit(target="canon", project, type, id, edits)` → find/replace within a canon entry
+- `edit(target="part_notes", project, part_id, edits)` → find/replace within part-level planning notes
+- `edit(target="chapter_notes", project, part_id, chapter_id, edits)` → find/replace within chapter-level planning notes
 - `edit(target="scratch", project, filename, edits)` → find/replace within a scratch file
 - `edit(target="guide", project, edits)` → find/replace within GUIDE.md
 

@@ -2,3 +2,9 @@ node_modules/
 dist/
 projects/
 test-projects/
+.DS_Store
+.vscode/settings.json
+.vscode/launch.json
+*.code-workspace
+*.code-snippets
+*.zip
