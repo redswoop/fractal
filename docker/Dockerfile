@@ -35,6 +35,7 @@ ENV GIT_USER_EMAIL="anakashian@gmail.com"
 
 # ── VS Code setup ───────────────────────────────────────────
 COPY install-extensions.sh /custom-cont-init.d/10-install-extensions
+COPY install-redline-macros.sh /custom-cont-init.d/11-install-redline-macros
 COPY disable-shell.sh /custom-cont-init.d/99-disable-shell
 COPY settings.json /defaults/settings.json
 
